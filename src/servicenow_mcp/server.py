@@ -24,8 +24,7 @@ from servicenow_mcp.tools.knowledge_base import (
 from servicenow_mcp.utils.config import ServerConfig
 from servicenow_mcp.utils.tool_utils import get_tool_definitions
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Logging is configured by the entrypoints (cli.py / server_sse.py) from LOG_LEVEL.
 logger = logging.getLogger(__name__)
 
 # Define path for the configuration file

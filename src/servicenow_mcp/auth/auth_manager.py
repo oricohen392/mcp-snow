@@ -10,6 +10,7 @@ from typing import Dict, Optional
 import requests
 from requests.auth import HTTPBasicAuth
 
+from servicenow_mcp.utils import settings
 from servicenow_mcp.utils.config import AuthConfig, AuthType
 
 
@@ -106,11 +107,17 @@ class AuthManager:
             "grant_type": "client_credentials"
         }
         
-        logger.info("Attempting client_credentials grant...")
-        response = requests.post(token_url, headers=headers, data=data_client_credentials)
+        logger.debug("Attempting client_credentials grant...")
+        response = requests.post(
+            token_url,
+            headers=headers,
+            data=data_client_credentials,
+            timeout=settings.servicenow_timeout(),
+            verify=settings.tls_verify(),
+        )
         
-        logger.info(f"client_credentials response status: {response.status_code}")
-        logger.info(f"client_credentials response body: {response.text}")
+        # Never log the response body: it contains the access token.
+        logger.debug(f"client_credentials response status: {response.status_code}")
         
         if response.status_code == 200:
             token_data = response.json()
@@ -126,12 +133,17 @@ class AuthManager:
                 "password": oauth_config.password
             }
             
-            logger.info("Attempting password grant...")
-            response = requests.post(token_url, headers=headers, data=data_password)
+            logger.debug("Attempting password grant...")
+            response = requests.post(
+                token_url,
+                headers=headers,
+                data=data_password,
+                timeout=settings.servicenow_timeout(),
+                verify=settings.tls_verify(),
+            )
             
-            logger.info(f"password grant response status: {response.status_code}")
-            logger.info(f"password grant response body: {response.text}")
-            
+            logger.debug(f"password grant response status: {response.status_code}")
+                
             if response.status_code == 200:
                 token_data = response.json()
                 self.token = token_data.get("access_token")

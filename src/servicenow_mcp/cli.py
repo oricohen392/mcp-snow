@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from mcp.server.stdio import stdio_server
 
 from servicenow_mcp.server import ServiceNowMCP
+from servicenow_mcp.utils.logging_setup import configure_logging
 from servicenow_mcp.utils.config import (
     ApiKeyConfig,
     AuthConfig,
@@ -21,11 +22,6 @@ from servicenow_mcp.utils.config import (
     ServerConfig,
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 
@@ -251,12 +247,8 @@ def main():
         # Parse command-line arguments
         args = parse_args()
 
-        # Configure logging level based on debug flag
-        if args.debug:
-            logging.getLogger().setLevel(logging.DEBUG)
-            logger.info("Debug logging enabled.")
-        else:
-            logging.getLogger().setLevel(logging.INFO)
+        # Configure logging from LOG_LEVEL; --debug / SERVICENOW_DEBUG force DEBUG
+        configure_logging("DEBUG" if args.debug else None)
 
         # Create server configuration
         config = create_config(args)

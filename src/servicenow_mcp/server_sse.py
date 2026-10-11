@@ -19,6 +19,7 @@ from starlette.routing import Mount, Route
 
 from servicenow_mcp.server import ServiceNowMCP
 from servicenow_mcp.utils.config import AuthConfig, AuthType, BasicAuthConfig, ServerConfig
+from servicenow_mcp.utils.logging_setup import configure_logging
 
 
 def create_starlette_app(mcp_server: Server, *, debug: bool = False) -> Starlette:
@@ -123,6 +124,7 @@ def create_servicenow_mcp(instance_url: str, username: str, password: str):
 
 def main():
     load_dotenv()
+    configure_logging()
 
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Run ServiceNow MCP SSE-based server")
