@@ -181,3 +181,10 @@ cython_debug/
 .env.development
 .env.test
 .env.production
+
+# Offline wheel cache (scripts/download_wheels.sh)
+wheelhouse/*
+!wheelhouse/.gitkeep
+
+# Container image exports
+*.tar

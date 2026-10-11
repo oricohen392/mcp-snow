@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: servicenow-mcp
+  labels:
+    app.kubernetes.io/name: servicenow-mcp
+spec:
+  # Keep 1: MCP SSE sessions live in process memory. A second replica behind the
+  # Service would receive POST /messages/ for sessions it does not know.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: servicenow-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: servicenow-mcp
+    spec:
+      automountServiceAccountToken: false
+      # No runAsUser/fsGroup: OpenShift's restricted(-v2) SCC assigns a random UID in group 0.
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: servicenow-mcp
+          image: image-registry.openshift-image-registry.svc:5000/CHANGE_ME/servicenow-mcp:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: servicenow-mcp-config
+            - secretRef:
+                name: servicenow-mcp-secret
+          # Optional private CA for the ServiceNow TLS certificate:
+          #   oc create configmap servicenow-ca --from-file=ca.pem=/path/to/ca.pem
+          # then uncomment the CA_BUNDLE env, the volumeMount and the volume below.
+          # env:
+          #   - name: CA_BUNDLE
+          #     value: /etc/servicenow-ca/ca.pem
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            # - name: servicenow-ca
+            #   mountPath: /etc/servicenow-ca
+            #   readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        # - name: servicenow-ca
+        #   configMap:
+        #     name: servicenow-ca

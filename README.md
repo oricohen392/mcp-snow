@@ -127,6 +127,64 @@ app = create_starlette_app(servicenow_mcp, debug=True)
 uvicorn.run(app, host="0.0.0.0", port=8080)
 ```
 
+## SSE deployment (Dify, OpenShift, air-gapped)
+
+### Environment variables
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SERVICENOW_INSTANCE_URL` | required | e.g. `https://acme.service-now.com` |
+| `SERVICENOW_USERNAME` / `SERVICENOW_PASSWORD` | required | Basic auth account used for every call |
+| `SERVICENOW_TIMEOUT` | `30` | HTTP timeout (seconds) for ServiceNow calls |
+| `CA_BUNDLE` | unset | PEM bundle used to verify the ServiceNow TLS certificate |
+| `READ_ONLY` | `true` | Write tools (create/update/resolve/approve...) are registered only when `false` |
+| `MCP_TOOL_PACKAGE` | `full` | Package from `config/tool_packages.yaml`; an unknown name fails startup |
+| `MCP_AUTH_TOKEN` | unset | If set, `/sse` and `/messages/` require `Authorization: Bearer <token>` |
+| `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8080` | Bind address |
+| `LOG_LEVEL` | `INFO` | `DEBUG` logs each ServiceNow request: method, path, sysparm params, status, ms (never headers/credentials) |
+| `MAX_LIMIT` | `100` | Upper bound for any list tool's `limit` |
+| `DEFAULT_TIMEZONE` | `UTC` | IANA zone for dates given without an offset |
+| `CHOICE_CACHE_TTL_SECONDS` | `3600` | Cache TTL for `sys_choice` label lookups |
+
+### Endpoint security
+
+`GET /sse` and `POST /messages/` are **unauthenticated unless `MCP_AUTH_TOKEN` is set**. Without a token, anyone who can reach the port can call the tools as the ServiceNow service account, so restrict access with `k8s/networkpolicy.yaml`. `GET /healthz` is always open and makes no ServiceNow call. Sessions are held in memory, so run **one replica**.
+
+### Query tools and transparency
+
+`list_incidents`, `list_change_requests`, `list_requests` (sc_request) and `list_request_items` (sc_req_item) accept:
+
+- `number` (exact, list allowed, prefix-checked)
+- `assignment_group` (partial, case-insensitive: `NOC` matches `INOC_1`; comma-separated = OR) and `assignment_group_exact`
+- `assigned_to`, `active`
+- `state`/`priority`/`category` (and change `type`/`risk`) given as labels or values, translated through the instance's `sys_choice`
+- `created_after/before`, `updated_after/before` (and change `start_*`/`end_*`) as ISO dates with an optional `timezone`
+- `query` (free text), `order_by`, `descending`, `limit`, `offset`
+
+Every response includes `query_used` (the exact `sysparm_query`), `total_count` (`X-Total-Count`), `returned`, `limit` and `offset`.
+
+An HTTP 200 with no rows adds a `hint`: either nothing matched, or ACLs/domain separation hide the rows. Run `check_access` to see the user, its roles and per-table visible counts. HTTP or network errors are `success: false` with `status_code` and `error_type`, never "0 results". Use `search_groups` to discover real group names. User values containing `^` or control characters are rejected.
+
+### Image and offline build
+
+```bash
+# online
+docker build -t servicenow-mcp .
+# air-gapped: on a machine with internet, fetch wheels, then copy the repo over
+docker run --rm -v "$PWD:/w" -w /w python:3.11-slim bash scripts/download_wheels.sh
+docker build --build-arg OFFLINE=1 -t servicenow-mcp .
+```
+
+The image installs a wheel (not editable) into `/opt/venv`, runs as UID 1001, and works under an arbitrary UID in group 0 (OpenShift `restricted` SCC) with a read-only root filesystem. Manifests are in `k8s/`: Deployment, Service, ConfigMap, Secret template and NetworkPolicy.
+
+### Smoke test in the pod
+
+```bash
+oc exec deploy/servicenow-mcp -- servicenow-mcp-smoke --group NOC --mcp-url http://localhost:8080/sse
+```
+
+This prints `check_access`, `search_groups("NOC")` and one list per table with `query_used`, `total_count` and `returned`. It then connects over MCP/SSE like Dify does and lists the tools.
+
 ## Tool Packaging (Optional)
 
 To manage the number of tools exposed to the language model (especially in environments with limits), the ServiceNow MCP server supports loading subsets of tools called "packages". This is controlled via the `MCP_TOOL_PACKAGE` environment variable.
@@ -143,7 +201,8 @@ To manage the number of tools exposed to the language model (especially in envir
 
 -   If `MCP_TOOL_PACKAGE` is set to a valid package name defined in `config/tool_packages.yaml`, only the tools listed in that package will be loaded.
 -   If `MCP_TOOL_PACKAGE` is **not set** or is empty, the `full` package (containing all tools) is loaded by default.
--   If `MCP_TOOL_PACKAGE` is set to an invalid package name, the `none` package is loaded (no tools except `list_tool_packages`), and a warning is logged.
+-   If `MCP_TOOL_PACKAGE` is set to an invalid package name, or `config/tool_packages.yaml` is missing or invalid, the server **fails at startup** with an error listing the valid names (it used to start with zero tools).
+-   With `READ_ONLY=true` (the default) only read tools (`list_*`, `get_*`, `search_*`, `check_*`) of the package are exposed; set `READ_ONLY=false` to expose write tools.
 -   Setting `MCP_TOOL_PACKAGE=none` explicitly loads no tools (except `list_tool_packages`).
 
 ### Available Packages (Default)

@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: servicenow-mcp-config
+  labels:
+    app.kubernetes.io/name: servicenow-mcp
+data:
+  # Not secret. Credentials live in the Secret (secret.example.yaml).
+  SERVICENOW_INSTANCE_URL: "https://your-instance.service-now.com"
+  SERVICENOW_TIMEOUT: "30"
+  # Write tools are only registered when this is explicitly "false".
+  READ_ONLY: "true"
+  # One of: full, service_desk, change_coordinator, ... (config/tool_packages.yaml).
+  # An invalid name makes the pod fail at startup (check the logs).
+  MCP_TOOL_PACKAGE: "full"
+  LOG_LEVEL: "INFO"            # DEBUG logs every ServiceNow request (path, sysparm_*, status, ms)
+  MAX_LIMIT: "100"
+  DEFAULT_TIMEZONE: "UTC"      # e.g. "Asia/Jerusalem"; used for dates given without an offset
+  CHOICE_CACHE_TTL_SECONDS: "3600"
