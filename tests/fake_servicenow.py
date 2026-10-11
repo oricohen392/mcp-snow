@@ -97,7 +97,7 @@ class FakeServiceNow:
 
     def __call__(self, url, params=None, headers=None, timeout=None, verify=None, **kwargs):
         self.calls.append({"url": url, "params": dict(params or {}), "timeout": timeout})
-        if url.endswith("/table/sys_choice"):
+        if url.endswith("/table/sys_choice") and "sysparm_query" in (params or {}):
             query = params["sysparm_query"]
             name = query.split("name=")[1].split("^")[0]
             element = query.split("element=")[1].split("^")[0]
