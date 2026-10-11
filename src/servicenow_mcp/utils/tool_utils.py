@@ -1027,3 +1027,14 @@ def get_tool_definitions(
         ),
     }
     return tool_definitions
+
+
+# Tools whose names start with these prefixes only read data. Everything else
+# (create_*, update_*, add_*, resolve_*, approve_*, publish_*, ...) is treated as
+# a write tool and is hidden while READ_ONLY=true.
+READ_TOOL_PREFIXES = ("list_", "get_", "search_", "check_")
+
+
+def is_read_tool(tool_name: str) -> bool:
+    """True when the tool only reads from ServiceNow."""
+    return tool_name.startswith(READ_TOOL_PREFIXES)
