@@ -5,14 +5,27 @@ This module provides tools for managing change requests in ServiceNow.
 """
 
 import logging
-from datetime import datetime
 from typing import Any, Dict, List, Optional, Type, TypeVar
 
 import requests
 from pydantic import BaseModel, Field
 
 from servicenow_mcp.auth.auth_manager import AuthManager
+from servicenow_mcp.tools.ticket_query import (
+    CHANGE_REQUEST,
+    TaskListParamsBase,
+    choice_description,
+    date_description,
+    number_description,
+    order_description,
+    run_list,
+    validate_numbers,
+)
+from servicenow_mcp.utils import settings
 from servicenow_mcp.utils.config import ServerConfig
+from servicenow_mcp.utils.dates import utc_now_string
+from servicenow_mcp.utils.http import sn_get
+from servicenow_mcp.utils.query import QueryBuilder, QueryInputError, is_sys_id
 
 logger = logging.getLogger(__name__)
 
@@ -51,23 +64,74 @@ class UpdateChangeRequestParams(BaseModel):
     work_notes: Optional[str] = Field(None, description="Work notes to add to the change request")
 
 
-class ListChangeRequestsParams(BaseModel):
+class ListChangeRequestsParams(TaskListParamsBase):
     """Parameters for listing change requests."""
 
-    limit: Optional[int] = Field(10, description="Maximum number of records to return")
-    offset: Optional[int] = Field(0, description="Offset to start from")
-    state: Optional[str] = Field(None, description="Filter by state")
-    type: Optional[str] = Field(None, description="Filter by type (normal, standard, emergency)")
-    category: Optional[str] = Field(None, description="Filter by category")
-    assignment_group: Optional[str] = Field(None, description="Filter by assignment group")
-    timeframe: Optional[str] = Field(None, description="Filter by timeframe (upcoming, in-progress, completed)")
-    query: Optional[str] = Field(None, description="Additional query string")
+    number: Optional[str] = Field(None, description=number_description(CHANGE_REQUEST))
+    state: Optional[str] = Field(
+        None,
+        description=choice_description(
+            "change state",
+            "Typical out-of-box labels: 'New', 'Assess', 'Authorize', 'Scheduled', "
+            "'Implement', 'Review', 'Closed', 'Canceled' (values '-5','-4','-3','-2','-1',"
+            "'0','3','4'); your instance's own labels apply.",
+        ),
+    )
+    type: Optional[str] = Field(
+        None,
+        description=choice_description(
+            "change type", "Typical values: 'normal', 'standard', 'emergency'."
+        ),
+    )
+    risk: Optional[str] = Field(
+        None,
+        description=choice_description(
+            "risk", "Typical labels: 'High', 'Moderate', 'Low' (values '2','3','4')."
+        ),
+    )
+    priority: Optional[str] = Field(
+        None,
+        description=choice_description(
+            "priority", "Examples: '1 - Critical', 'High' or value '1'..'4'."
+        ),
+    )
+    category: Optional[str] = Field(
+        None,
+        description=choice_description(
+            "category", "Examples: 'Hardware', 'Software', 'Network', 'Other'."
+        ),
+    )
+    start_after: Optional[str] = Field(
+        None, description=date_description("Planned start_date", "at or after", ">=")
+    )
+    start_before: Optional[str] = Field(
+        None, description=date_description("Planned start_date", "before", "<")
+    )
+    end_after: Optional[str] = Field(
+        None, description=date_description("Planned end_date", "at or after", ">=")
+    )
+    end_before: Optional[str] = Field(
+        None, description=date_description("Planned end_date", "before", "<")
+    )
+    timeframe: Optional[str] = Field(
+        None,
+        description=(
+            "Relative to now (UTC): 'upcoming' (start_date in the future), 'in-progress' "
+            "(started, not yet ended) or 'completed' (end_date in the past)."
+        ),
+    )
+    order_by: Optional[str] = Field(
+        None, description=order_description(CHANGE_REQUEST.order_fields)
+    )
 
 
 class GetChangeRequestDetailsParams(BaseModel):
     """Parameters for getting change request details."""
 
-    change_id: str = Field(..., description="Change request ID or sys_id")
+    change_id: str = Field(
+        ...,
+        description="Change request number (e.g. 'CHG0030001') or 32-character sys_id.",
+    )
 
 
 class AddChangeTaskParams(BaseModel):
@@ -393,6 +457,38 @@ def update_change_request(
         }
 
 
+def _split_config_and_auth(first: Any, second: Any):
+    """
+    Return (server_config, auth_manager) whatever order they were passed in.
+
+    The change tools are declared (auth_manager, server_config, params) but the
+    MCP server calls every tool as (config, auth_manager, params).
+    """
+    if hasattr(first, "get_headers") and not hasattr(second, "get_headers"):
+        return second, first
+    return first, second
+
+
+TIMEFRAMES = ("upcoming", "in-progress", "completed")
+
+
+def _change_timeframe(builder: QueryBuilder, params: ListChangeRequestsParams) -> None:
+    timeframe = params.timeframe
+    if not timeframe:
+        return
+    if timeframe not in TIMEFRAMES:
+        raise QueryInputError(
+            f"timeframe '{timeframe}' is not valid. Allowed: {', '.join(TIMEFRAMES)}"
+        )
+    now = utc_now_string()
+    if timeframe == "upcoming":
+        builder.where("start_date", ">", now)
+    elif timeframe == "in-progress":
+        builder.where("start_date", "<", now).where("end_date", ">", now)
+    else:
+        builder.where("end_date", "<", now)
+
+
 def list_change_requests(
     auth_manager: AuthManager,
     server_config: ServerConfig,
@@ -407,96 +503,29 @@ def list_change_requests(
         params: The parameters for listing change requests.
 
     Returns:
-        A list of change requests.
+        The change requests plus count/total (total = X-Total-Count when
+        available), query_used, returned, limit and offset.
     """
-    # Unwrap and validate parameters
-    result = _unwrap_and_validate_params(
-        params, 
-        ListChangeRequestsParams
-    )
-    
+    result = _unwrap_and_validate_params(params, ListChangeRequestsParams)
     if not result["success"]:
         return result
-    
     validated_params = result["params"]
-    
-    # Build the query
-    query_parts = []
-    
-    if validated_params.state:
-        query_parts.append(f"state={validated_params.state}")
-    if validated_params.type:
-        query_parts.append(f"type={validated_params.type}")
-    if validated_params.category:
-        query_parts.append(f"category={validated_params.category}")
-    if validated_params.assignment_group:
-        query_parts.append(f"assignment_group={validated_params.assignment_group}")
-    
-    # Handle timeframe filtering
-    if validated_params.timeframe:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if validated_params.timeframe == "upcoming":
-            query_parts.append(f"start_date>{now}")
-        elif validated_params.timeframe == "in-progress":
-            query_parts.append(f"start_date<{now}^end_date>{now}")
-        elif validated_params.timeframe == "completed":
-            query_parts.append(f"end_date<{now}")
-    
-    # Add any additional query string
-    if validated_params.query:
-        query_parts.append(validated_params.query)
-    
-    # Combine query parts
-    query = "^".join(query_parts) if query_parts else ""
-    
-    # Get the instance URL
-    instance_url = _get_instance_url(auth_manager, server_config)
-    if not instance_url:
-        return {
-            "success": False,
-            "message": "Cannot find instance_url in either server_config or auth_manager",
-        }
-    
-    # Get the headers
-    headers = _get_headers(auth_manager, server_config)
-    if not headers:
-        return {
-            "success": False,
-            "message": "Cannot find get_headers method in either auth_manager or server_config",
-        }
-    
-    # Make the API request
-    url = f"{instance_url}/api/now/table/change_request"
-    
-    params = {
-        "sysparm_limit": validated_params.limit,
-        "sysparm_offset": validated_params.offset,
-        "sysparm_query": query,
-        "sysparm_display_value": "true",
-    }
-    
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        
-        result = response.json()
-        
-        # Handle the case where result["result"] is a list
-        change_requests = result.get("result", [])
-        count = len(change_requests)
-        
-        return {
-            "success": True,
-            "change_requests": change_requests,
-            "count": count,
-            "total": count,  # Use count as total if total is not provided
-        }
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error listing change requests: {e}")
-        return {
-            "success": False,
-            "message": f"Error listing change requests: {str(e)}",
-        }
+
+    config, auth = _split_config_and_auth(server_config, auth_manager)
+    response = run_list(
+        config,
+        auth,
+        CHANGE_REQUEST,
+        validated_params,
+        records_key="change_requests",
+        error_prefix="Error listing change requests",
+        extra=_change_timeframe,
+    )
+    if response.get("success"):
+        response["count"] = response["returned"]
+        total = response.get("total_count")
+        response["total"] = total if total is not None else response["returned"]
+    return response
 
 
 def get_change_request_details(
@@ -505,7 +534,7 @@ def get_change_request_details(
     params: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
-    Get details of a change request from ServiceNow.
+    Get details of a change request (by number or sys_id) and its change tasks.
 
     Args:
         auth_manager: The authentication manager.
@@ -515,70 +544,74 @@ def get_change_request_details(
     Returns:
         The change request details.
     """
-    # Unwrap and validate parameters
     result = _unwrap_and_validate_params(
-        params, 
+        params,
         GetChangeRequestDetailsParams,
-        required_fields=["change_id"]
+        required_fields=["change_id"],
     )
-    
     if not result["success"]:
         return result
-    
     validated_params = result["params"]
-    
-    # Get the instance URL
-    instance_url = _get_instance_url(auth_manager, server_config)
-    if not instance_url:
-        return {
-            "success": False,
-            "message": "Cannot find instance_url in either server_config or auth_manager",
-        }
-    
-    # Get the headers
-    headers = _get_headers(auth_manager, server_config)
-    if not headers:
-        return {
-            "success": False,
-            "message": "Cannot find get_headers method in either auth_manager or server_config",
-        }
-    
-    # Make the API request
-    url = f"{instance_url}/api/now/table/change_request/{validated_params.change_id}"
-    
-    params = {
-        "sysparm_display_value": "true",
-    }
-    
+    config, auth = _split_config_and_auth(server_config, auth_manager)
+
+    change_id = validated_params.change_id.strip()
     try:
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        
-        result = response.json()
-        
-        # Get tasks associated with this change request
-        tasks_url = f"{instance_url}/api/now/table/change_task"
-        tasks_params = {
-            "sysparm_query": f"change_request={validated_params.change_id}",
-            "sysparm_display_value": "true",
-        }
-        
-        tasks_response = requests.get(tasks_url, headers=headers, params=tasks_params)
-        tasks_response.raise_for_status()
-        
-        tasks_result = tasks_response.json()
-        
-        return {
-            "success": True,
-            "change_request": result["result"],
-            "tasks": tasks_result["result"],
-        }
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error getting change request details: {e}")
+        if is_sys_id(change_id):
+            query = QueryBuilder().eq("sys_id", change_id.lower()).build()
+        else:
+            number = validate_numbers(CHANGE_REQUEST, change_id)[0]
+            query = QueryBuilder().eq("number", number).build()
+    except QueryInputError as e:
         return {
             "success": False,
-            "message": f"Error getting change request details: {str(e)}",
+            "status_code": None,
+            "error_type": "invalid_input",
+            "message": f"Error getting change request details: {e}",
         }
+
+    record = sn_get(
+        config,
+        auth,
+        "table/change_request",
+        {"sysparm_query": query, "sysparm_limit": 1, "sysparm_display_value": "true"},
+    )
+    if not record.ok:
+        response = record.error_dict("Error getting change request details")
+        response["query_used"] = query
+        return response
+    if not record.records:
+        return {
+            "success": False,
+            "message": f"Change request not found: {change_id}",
+            "query_used": query,
+            "hint": "No row returned: the change does not exist or this account cannot read it "
+            "(ACL / domain separation). Run check_access.",
+        }
+    change = record.records[0]
+    sys_id = change.get("sys_id")
+    if isinstance(sys_id, dict):
+        sys_id = sys_id.get("value")
+
+    tasks_query = QueryBuilder().eq("change_request", sys_id).build()
+    tasks = sn_get(
+        config,
+        auth,
+        "table/change_task",
+        {
+            "sysparm_query": tasks_query,
+            "sysparm_display_value": "true",
+            "sysparm_limit": settings.max_limit(),
+        },
+    )
+    response = {
+        "success": True,
+        "change_request": change,
+        "tasks": tasks.records if tasks.ok else [],
+        "query_used": query,
+    }
+    if not tasks.ok:
+        response["tasks_error"] = tasks.error_dict("Could not load change tasks")
+    return response
 
 
 def add_change_task(

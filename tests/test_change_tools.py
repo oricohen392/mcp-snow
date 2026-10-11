@@ -134,52 +134,71 @@ class TestChangeTools(unittest.TestCase):
 
     @patch("servicenow_mcp.tools.change_tools.requests.get")
     def test_list_change_requests_with_filters(self, mock_get):
-        """Test listing change requests with filters."""
-        # Mock the response
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "result": [
-                {
-                    "sys_id": "change123",
-                    "number": "CHG0010001",
-                    "short_description": "Test Change",
-                    "type": "normal",
-                    "state": "open",
-                }
-            ]
+        """Test listing change requests with filters.
+
+        Labels are resolved through sys_choice, assignment_group is a partial
+        name match and query is free text (it used to be a raw encoded query).
+        """
+        choices = {
+            "state": [{"value": "-5", "label": "New"}],
+            "type": [{"value": "normal", "label": "Normal"}],
+            "category": [{"value": "Hardware", "label": "Hardware"}],
         }
-        mock_response.raise_for_status = MagicMock()
-        mock_get.return_value = mock_response
+
+        def fake_get(url, params=None, **kwargs):
+            response = MagicMock()
+            response.raise_for_status = MagicMock()
+            if url.endswith("/table/sys_choice"):
+                element = params["sysparm_query"].split("element=")[1].split("^")[0]
+                response.json.return_value = {"result": choices.get(element, [])}
+            else:
+                response.json.return_value = {
+                    "result": [
+                        {
+                            "sys_id": "change123",
+                            "number": "CHG0010001",
+                            "short_description": "Test Change",
+                            "type": "normal",
+                            "state": "New",
+                        }
+                    ]
+                }
+            return response
+
+        mock_get.side_effect = fake_get
 
         # Call the function with filters
         params = {
             "limit": 10,
-            "state": "open",
+            "state": "new",
             "type": "normal",
             "category": "Hardware",
             "assignment_group": "IT Support",
             "timeframe": "upcoming",
-            "query": "short_description=Test",
+            "query": "Test",
         }
         result = list_change_requests(self.auth_manager, self.server_config, params)
 
         # Verify the result
         self.assertTrue(result["success"])
         self.assertEqual(len(result["change_requests"]), 1)
-        
+
         # Verify that the correct query parameters were passed to the request
         args, kwargs = mock_get.call_args
+        self.assertTrue(args[0].endswith("/table/change_request"))
         self.assertIn("params", kwargs)
         self.assertIn("sysparm_query", kwargs["params"])
         query = kwargs["params"]["sysparm_query"]
-        
+        self.assertEqual(query, result["query_used"])
+
         # Check that all filters are in the query
-        self.assertIn("state=open", query)
+        self.assertIn("state=-5", query)
         self.assertIn("type=normal", query)
         self.assertIn("category=Hardware", query)
-        self.assertIn("assignment_group=IT Support", query)
-        self.assertIn("short_description=Test", query)
-        # The timeframe filter adds a date comparison, which is harder to test exactly
+        self.assertIn("assignment_group.nameLIKEIT Support", query)
+        self.assertIn("short_descriptionLIKETest^ORdescriptionLIKETest", query)
+        self.assertIn("start_date>", query)
+        self.assertTrue(query.endswith("^ORDERBYDESCsys_created_on"))
 
     @patch("servicenow_mcp.tools.change_tools.requests.post")
     def test_create_change_request_with_swapped_parameters(self, mock_post):

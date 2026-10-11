@@ -16,6 +16,16 @@ service_desk:
   - resolve_incident
   - list_incidents
   - get_incident_by_number
+  # Service Requests
+  - list_requests
+  - list_request_items
+  - get_request_by_number
+  - get_request_item_by_number
+  # Change lookup
+  - list_change_requests
+  - get_change_request_details
+  # Discovery
+  - search_groups
   # User Lookup
   - get_user
   - list_users
@@ -50,6 +60,8 @@ catalog_builder:
   - get_optimization_recommendations
 
 change_coordinator:
+  # Discovery
+  - search_groups
   # Change Lifecycle
   - create_change_request
   - update_change_request
@@ -154,6 +166,13 @@ full:
   - resolve_incident
   - list_incidents
   - get_incident_by_number
+  # Service Requests
+  - list_requests
+  - list_request_items
+  - get_request_by_number
+  - get_request_item_by_number
+  # Discovery
+  - search_groups
   # Catalog (Core)
   - list_catalogs
   - list_catalog_items

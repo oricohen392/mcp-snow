@@ -2,6 +2,20 @@ from typing import Any, Callable, Dict, Tuple, Type
 
 # Import all necessary tool implementation functions and params models
 # (This list needs to be kept complete and up-to-date)
+from servicenow_mcp.tools.access_tools import SearchGroupsParams
+from servicenow_mcp.tools.access_tools import search_groups as search_groups_tool
+from servicenow_mcp.tools.request_tools import (
+    GetRequestByNumberParams,
+    GetRequestItemByNumberParams,
+    ListRequestItemsParams,
+    ListRequestsParams,
+)
+from servicenow_mcp.tools.request_tools import (
+    get_request_by_number as get_request_by_number_tool,
+    get_request_item_by_number as get_request_item_by_number_tool,
+    list_request_items as list_request_items_tool,
+    list_requests as list_requests_tool,
+)
 from servicenow_mcp.tools.catalog_optimization import (
     OptimizationRecommendationsParams,
     UpdateCatalogItemParams,
@@ -397,15 +411,59 @@ def get_tool_definitions(
             list_incidents_tool,
             ListIncidentsParams,
             str,  # Expects JSON string
-            "List incidents from ServiceNow",
+            "List/search incidents. Filters: number, state/priority/category (labels such as "
+            "'New' or 'High' are translated via sys_choice), active, assignment_group "
+            "(partial name, e.g. 'NOC'), assignment_group_exact, assigned_to, created/updated "
+            "date ranges, free-text query. Response includes query_used (the exact ServiceNow "
+            "query), total_count and a hint when nothing matched.",
             "json",  # Tool returns list/dict, needs JSON dump
         ),
-        "get_incident_by_number":(
+        "get_incident_by_number": (
             get_incident_by_number_tool,
             GetIncidentByNumberParams,
             str,
-            "Incident details from ServiceNow",
-            "json_dict"
+            "Get one incident by its exact number, e.g. INC0010001.",
+            "json_dict",
+        ),
+        # Service request tools
+        "list_requests": (
+            list_requests_tool,
+            ListRequestsParams,
+            str,
+            "List/search service catalog requests (sc_request, numbers REQ...). Same filters "
+            "as list_incidents plus request_state. Response includes query_used and total_count.",
+            "json",
+        ),
+        "list_request_items": (
+            list_request_items_tool,
+            ListRequestItemsParams,
+            str,
+            "List/search requested items (sc_req_item, numbers RITM...). Same filters as "
+            "list_incidents plus stage. Response includes query_used and total_count.",
+            "json",
+        ),
+        "get_request_by_number": (
+            get_request_by_number_tool,
+            GetRequestByNumberParams,
+            str,
+            "Get one service catalog request by its exact number, e.g. REQ0010001.",
+            "json_dict",
+        ),
+        "get_request_item_by_number": (
+            get_request_item_by_number_tool,
+            GetRequestItemByNumberParams,
+            str,
+            "Get one requested item by its exact number, e.g. RITM0010001.",
+            "json_dict",
+        ),
+        # Discovery tools
+        "search_groups": (
+            search_groups_tool,
+            SearchGroupsParams,
+            str,
+            "Find assignment groups (sys_user_group) whose name contains a fragment, e.g. "
+            "'NOC' -> 'INOC_1'. Use before filtering tickets by group.",
+            "json",
         ),
         # Catalog Tools
         "list_catalog_items": (
@@ -505,14 +563,17 @@ def get_tool_definitions(
             list_change_requests_tool,
             ListChangeRequestsParams,
             str,  # Expects JSON string
-            "List change requests from ServiceNow",
+            "List/search change requests. Filters: number, state/type/risk/priority/category "
+            "(labels translated via sys_choice), assignment_group (partial name), "
+            "assignment_group_exact, created/updated and planned start/end date ranges, "
+            "timeframe, free-text query. Response includes query_used and total_count.",
             "json",  # Tool returns list/dict
         ),
         "get_change_request_details": (
             get_change_request_details_tool,
             GetChangeRequestDetailsParams,
             str,  # Expects JSON string
-            "Get detailed information about a specific change request",
+            "Get one change request (by number, e.g. CHG0030001, or sys_id) with its change tasks.",
             "json",  # Tool returns list/dict
         ),
         "add_change_task": (

@@ -11,6 +11,15 @@ import requests
 from pydantic import BaseModel, Field
 
 from servicenow_mcp.auth.auth_manager import AuthManager
+from servicenow_mcp.tools.ticket_query import (
+    INCIDENT,
+    TaskListParamsBase,
+    choice_description,
+    order_description,
+    number_description,
+    run_get_by_number,
+    run_list,
+)
 from servicenow_mcp.utils.config import ServerConfig
 
 logger = logging.getLogger(__name__)
@@ -66,21 +75,40 @@ class ResolveIncidentParams(BaseModel):
     resolution_notes: str = Field(..., description="Resolution notes for the incident")
 
 
-class ListIncidentsParams(BaseModel):
+class ListIncidentsParams(TaskListParamsBase):
     """Parameters for listing incidents."""
-    
-    limit: int = Field(10, description="Maximum number of incidents to return")
-    offset: int = Field(0, description="Offset for pagination")
-    state: Optional[str] = Field(None, description="Filter by incident state")
-    assigned_to: Optional[str] = Field(None, description="Filter by assigned user")
-    category: Optional[str] = Field(None, description="Filter by category")
-    query: Optional[str] = Field(None, description="Search query for incidents")
+
+    number: Optional[str] = Field(None, description=number_description(INCIDENT))
+    state: Optional[str] = Field(
+        None,
+        description=choice_description(
+            "incident state",
+            "Typical out-of-box labels: 'New', 'In Progress', 'On Hold', 'Resolved', 'Closed', "
+            "'Canceled' (values '1','2','3','6','7','8'); your instance's own labels apply.",
+        ),
+    )
+    priority: Optional[str] = Field(
+        None,
+        description=choice_description(
+            "priority",
+            "Examples: '1 - Critical', 'Critical', 'High' or value '1'..'5'.",
+        ),
+    )
+    category: Optional[str] = Field(
+        None,
+        description=choice_description(
+            "category", "Examples: 'Network', 'Software', 'Hardware', 'Inquiry / Help'."
+        ),
+    )
+    order_by: Optional[str] = Field(None, description=order_description(INCIDENT.order_fields))
 
 
 class GetIncidentByNumberParams(BaseModel):
     """Parameters for fetching an incident by its number."""
 
-    incident_number: str = Field(..., description="The number of the incident to fetch")
+    incident_number: str = Field(
+        ..., description="Exact incident number, INC followed by digits, e.g. 'INC0010001'."
+    )
 
 
 class IncidentResponse(BaseModel):
@@ -470,79 +498,17 @@ def list_incidents(
         params: Parameters for listing incidents.
 
     Returns:
-        Dictionary with list of incidents.
+        Dictionary with the incidents plus query_used, total_count, returned,
+        limit and offset; a hint when nothing matched.
     """
-    api_url = f"{config.api_url}/table/incident"
-
-    # Build query parameters
-    query_params = {
-        "sysparm_limit": params.limit,
-        "sysparm_offset": params.offset,
-        "sysparm_display_value": "true",
-        "sysparm_exclude_reference_link": "true",
-    }
-    
-    # Add filters
-    filters = []
-    if params.state:
-        filters.append(f"state={params.state}")
-    if params.assigned_to:
-        filters.append(f"assigned_to={params.assigned_to}")
-    if params.category:
-        filters.append(f"category={params.category}")
-    if params.query:
-        filters.append(f"short_descriptionLIKE{params.query}^ORdescriptionLIKE{params.query}")
-    
-    if filters:
-        query_params["sysparm_query"] = "^".join(filters)
-    
-    # Make request
-    try:
-        response = requests.get(
-            api_url,
-            params=query_params,
-            headers=auth_manager.get_headers(),
-            timeout=config.timeout,
-        )
-        response.raise_for_status()
-        
-        data = response.json()
-        incidents = []
-        
-        for incident_data in data.get("result", []):
-            # Handle assigned_to field which could be a string or a dictionary
-            assigned_to = incident_data.get("assigned_to")
-            if isinstance(assigned_to, dict):
-                assigned_to = assigned_to.get("display_value")
-            
-            incident = {
-                "sys_id": incident_data.get("sys_id"),
-                "number": incident_data.get("number"),
-                "short_description": incident_data.get("short_description"),
-                "description": incident_data.get("description"),
-                "state": incident_data.get("state"),
-                "priority": incident_data.get("priority"),
-                "assigned_to": assigned_to,
-                "category": incident_data.get("category"),
-                "subcategory": incident_data.get("subcategory"),
-                "created_on": incident_data.get("sys_created_on"),
-                "updated_on": incident_data.get("sys_updated_on"),
-            }
-            incidents.append(incident)
-        
-        return {
-            "success": True,
-            "message": f"Found {len(incidents)} incidents",
-            "incidents": incidents
-        }
-        
-    except requests.RequestException as e:
-        logger.error(f"Failed to list incidents: {e}")
-        return {
-            "success": False,
-            "message": f"Failed to list incidents: {str(e)}",
-            "incidents": []
-        }
+    return run_list(
+        config,
+        auth_manager,
+        INCIDENT,
+        params,
+        records_key="incidents",
+        error_prefix="Failed to list incidents",
+    )
 
 
 def get_incident_by_number(
@@ -561,63 +527,6 @@ def get_incident_by_number(
     Returns:
         Dictionary with the incident details.
     """
-    api_url = f"{config.api_url}/table/incident"
-
-    # Build query parameters
-    query_params = {
-        "sysparm_query": f"number={params.incident_number}",
-        "sysparm_limit": 1,
-        "sysparm_display_value": "true",
-        "sysparm_exclude_reference_link": "true",
-    }
-
-    # Make request
-    try:
-        response = requests.get(
-            api_url,
-            params=query_params,
-            headers=auth_manager.get_headers(),
-            timeout=config.timeout,
-        )
-        response.raise_for_status()
-
-        data = response.json()
-        result = data.get("result", [])
-
-        if not result:
-            return {
-                "success": False,
-                "message": f"Incident not found: {params.incident_number}",
-            }
-
-        incident_data = result[0]
-        assigned_to = incident_data.get("assigned_to")
-        if isinstance(assigned_to, dict):
-            assigned_to = assigned_to.get("display_value")
-
-        incident = {
-            "sys_id": incident_data.get("sys_id"),
-            "number": incident_data.get("number"),
-            "short_description": incident_data.get("short_description"),
-            "description": incident_data.get("description"),
-            "state": incident_data.get("state"),
-            "priority": incident_data.get("priority"),
-            "assigned_to": assigned_to,
-            "category": incident_data.get("category"),
-            "subcategory": incident_data.get("subcategory"),
-            "created_on": incident_data.get("sys_created_on"),
-            "updated_on": incident_data.get("sys_updated_on"),
-        }
-
-        return {
-            "success": True,
-            "message": f"Incident {params.incident_number} found",
-            "incident": incident,
-        }
-
-    except requests.RequestException as e:
-        logger.error(f"Failed to fetch incident: {e}")
-        return {
-            "success": False,
-            "message": f"Failed to fetch incident: {str(e)}",
-        }
+    return run_get_by_number(
+        config, auth_manager, INCIDENT, params.incident_number, record_key="incident"
+    )

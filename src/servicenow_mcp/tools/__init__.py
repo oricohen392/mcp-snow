@@ -113,8 +113,14 @@ from servicenow_mcp.tools.project_tools import (
     update_project,
     list_projects,
 )
+from servicenow_mcp.tools.access_tools import search_groups
+from servicenow_mcp.tools.request_tools import (
+    get_request_by_number,
+    get_request_item_by_number,
+    list_request_items,
+    list_requests,
+)
 # from servicenow_mcp.tools.problem_tools import create_problem, update_problem
-# from servicenow_mcp.tools.request_tools import create_request, update_request
 
 __all__ = [
     # Incident tools
@@ -124,6 +130,15 @@ __all__ = [
     "resolve_incident",
     "list_incidents",
     "get_incident_by_number",
+    
+    # Service request tools
+    "list_requests",
+    "list_request_items",
+    "get_request_by_number",
+    "get_request_item_by_number",
+    
+    # Discovery tools
+    "search_groups",
     
     # Catalog tools
     "list_catalog_items",
