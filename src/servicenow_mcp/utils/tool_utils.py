@@ -2,7 +2,8 @@ from typing import Any, Callable, Dict, Tuple, Type
 
 # Import all necessary tool implementation functions and params models
 # (This list needs to be kept complete and up-to-date)
-from servicenow_mcp.tools.access_tools import SearchGroupsParams
+from servicenow_mcp.tools.access_tools import CheckAccessParams, SearchGroupsParams
+from servicenow_mcp.tools.access_tools import check_access as check_access_tool
 from servicenow_mcp.tools.access_tools import search_groups as search_groups_tool
 from servicenow_mcp.tools.request_tools import (
     GetRequestByNumberParams,
@@ -457,6 +458,16 @@ def get_tool_definitions(
             "json_dict",
         ),
         # Discovery tools
+        "check_access": (
+            check_access_tool,
+            CheckAccessParams,
+            str,
+            "Diagnose access: which ServiceNow user this server authenticates as, its roles, the "
+            "instance host, and per table (incident, change_request, sc_request, sc_req_item, "
+            "sys_user_group, sys_choice) whether it is readable and how many rows this account "
+            "can see. Use when a list returns 0 results unexpectedly.",
+            "json",
+        ),
         "search_groups": (
             search_groups_tool,
             SearchGroupsParams,
