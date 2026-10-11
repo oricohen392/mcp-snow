@@ -117,4 +117,190 @@ Line numbers refer to the pinned commit `0625060`.
 
 ## Part 2: Changes on this branch
 
-_Filled in as commits land; see the end of the document._
+**Verification status: unit-tested and mock-tested only.** No request on this branch has been sent to a real ServiceNow instance or made by a real Dify. Everything below was verified one of three ways:
+- pytest with mocked HTTP,
+- the Docker image run locally against an unreachable placeholder instance (`example.invalid`),
+- the MCP Python client 1.3.0 talking to that container over SSE.
+
+### Commits (`0625060..feature/itsm-query-hardening`)
+
+| Commit | Topic |
+|---|---|
+| `docs: add AUDIT.md` | Part 1 of this file |
+| `logging: … (J)` | `LOG_LEVEL`; `utils/http.py` (`sn_get`: timeout, `CA_BUNDLE`, `X-Total-Count`, typed errors, DEBUG request log); OAuth token body no longer logged |
+| `query: … (E, F)` | `utils/query.py`: `sanitize_value`, `split_list`, `QueryBuilder` with atomic OR groups |
+| `choices: … (B)` | `utils/choices.py`: label → value through `sys_choice`, TTL cache, fallback to `task` |
+| `dates: … (C)` | `utils/dates.py`: ISO → UTC, `timezone` / `DEFAULT_TIMEZONE`; `tzdata` dependency |
+| `tools: shared task list engine … (A, D, G, I)` | `tools/ticket_query.py`; incident/change rewired; new `request_tools.py`, `search_groups` |
+| `tools: add check_access (H)` | `tools/access_tools.py` |
+| `server: READ_ONLY … (K, L)` | read-only default, loud package/config errors, packaged YAML, `^` guard, null-free schemas |
+| `sse: … (M)` | optional Bearer auth, `/healthz`, `debug=False`, fail-fast startup |
+| `packaging: … (N)` | multi-stage Dockerfile, wheelhouse script, `requirements.lock`, `k8s/`, README |
+| `smoke: …` | `servicenow-mcp-smoke` / `scripts/smoke_test.py` |
+
+### What each fix does
+
+- **A. Group filters.** All four list tools now take:
+  - `assignment_group`: `assignment_group.nameLIKE<v>`. Comma-separated values, a JSON array or a list become an OR group. A 32-hex value is treated as an exact sys_id.
+  - `assignment_group_exact`: `assignment_group.name=<v>` (OR for several).
+  - `assigned_to`: `assigned_to.nameLIKE<v>^ORassigned_to.user_name=<v>`, or a sys_id.
+  - New tool `search_groups(name_part)` on `sys_user_group`.
+  - Test: `"NOC"` → `assignment_group.nameLIKENOC^ORDERBYDESCsys_created_on`.
+- **B. Label resolution.** Applies to state, priority and category (incident); state, type, risk, priority and category (change); state, request_state and priority (sc_request); state, stage and priority (sc_req_item).
+  - Matching order: value, then case-insensitive label, then label without a leading `N - ` prefix.
+  - Unknown input returns an error listing every `Label (value)` pair.
+  - No state numbers are hard-coded.
+  - If `sys_choice` is unreadable: numeric fields accept numeric values (with a warning) and reject labels with a clear message; string fields pass through with a warning.
+- **C. Dates.**
+  - `created_after/before` and `updated_after/before` on all four tables; `start_after/before` and `end_after/before` on change.
+  - Input without an offset is read in `timezone` (else `DEFAULT_TIMEZONE`) and sent as UTC `YYYY-MM-DD HH:MM:SS`.
+  - `_after` means `>=`, `_before` means `<`.
+  - `timeframe` now uses UTC and rejects unknown values.
+- **D. Number.**
+  - `number` filter (list → `numberIN…`) with prefix validation `^(INC|CHG|REQ|RITM)\d+$`.
+  - Exact get tools: `get_incident_by_number`, `get_request_by_number`, `get_request_item_by_number`.
+  - `get_change_request_details` now accepts a CHG number as well as a sys_id.
+- **E. Sanitization.** Every user value goes through `sanitize_value`, which rejects:
+  - `^`
+  - control characters (newline, tab, NUL, ESC, DEL)
+  - empty values, and values over 200 characters
+  - commas inside `IN` lists
+
+  Field names and operators are whitelisted. As defense in depth, the server rejects `^` in any string argument of any read tool, including the older catalog/KB/user tools.
+- **F. Precedence.** Free text becomes one atomic group, `short_descriptionLIKEq^ORdescriptionLIKEq`. Tests assert that every OR group is contiguous and that no term starts with `^OR`.
+- **G. Transparency.**
+  - Every list response adds `query_used`, `total_count`, `returned`, `limit` and `offset`. `limit_capped` and `warnings` appear when relevant.
+  - Get-by-number responses add `query_used`.
+  - HTTP 200 with no rows adds a `hint` explaining the ACL/domain possibility and pointing to `check_access`.
+  - When `X-Total-Count` is larger than what was returned, a row-ACL hint is added.
+  - 401, 403, 404, 5xx, timeouts, connection errors and non-JSON (SSO page) responses return `success:false` with `status_code` and `error_type`. ServiceNow's error body is included when present.
+  - Existing keys are kept: `incidents`, `message: "Found N incidents"`, and `change_requests`/`count`/`total`. `total` is now `X-Total-Count` when available.
+- **H. `check_access`.** Reports:
+  - instance host
+  - configured and verified user (`sys_user`, domain, and roles from `sys_user_has_role` when readable)
+  - per table (incident, change_request, sc_request, sc_req_item, sys_user_group, sys_choice): HTTP status, readable, and `visible_count` from `X-Total-Count`
+
+  If nothing is readable, it returns `success:false`.
+- **I. Limits and ordering.**
+  - `MAX_LIMIT` (default 100) clamps `limit`.
+  - `order_by` comes from a per-table whitelist: `sys_created_on, sys_updated_on, opened_at, number, priority, state`, plus `start_date`/`end_date` for change and `due_date` for requests.
+  - `descending` defaults to true.
+  - Default ordering is `ORDERBYDESCsys_created_on`.
+- **J. Logging.**
+  - `LOG_LEVEL` is honored by both entrypoints. An invalid value fails startup; `SERVICENOW_DEBUG=true` still means DEBUG.
+  - At DEBUG, every ServiceNow GET logs method, path, sysparm params, status, elapsed ms and `X-Total-Count`.
+  - The Authorization header, password and OAuth token are never logged (covered by tests).
+  - Each list call logs its `query_used` at INFO.
+- **K. Read-only and package loading.**
+  - `READ_ONLY` defaults to true. Only tools named `list_*`, `get_*`, `search_*` or `check_*` are registered; write tools need `READ_ONLY=false`.
+  - An invalid `MCP_TOOL_PACKAGE`, or a missing or malformed YAML, raises at startup (exit code 2 from `servicenow-mcp-sse`).
+  - `tool_packages.yaml` is shipped inside the wheel.
+  - Package entries that don't match any tool are logged as a WARNING.
+- **L. Schemas and descriptions.**
+  - `anyOf[X, null]` is collapsed to `X`; `default: null` and `title` are dropped.
+  - `list_tool_packages` no longer requires `random_string`.
+  - Every ITSM parameter description has examples and valid values, and states that labels come from the instance. Checked by a test and by the in-container MCP `tools/list`, which shows no `anyOf` in any of the 36 schemas.
+  - List inputs are typed as `string` (comma-separated) to avoid array or union schemas. JSON arrays and real lists are also accepted.
+- **M. Endpoint auth.**
+  - With `MCP_AUTH_TOKEN` set, `/sse` and `/messages/` require `Authorization: Bearer` (constant-time compare). Without it, a WARNING at startup says the endpoints are unauthenticated.
+  - `/healthz` is always open.
+  - Starlette `debug=False`.
+- **N. Packaging.**
+  - Multi-stage Dockerfile with a non-editable wheel install in `/opt/venv`.
+  - Runs as UID 1001, and works under an arbitrary UID in group 0 with a read-only root filesystem (both verified locally).
+  - No source, `.git` or `.tar` in the final image (verified).
+  - `scripts/download_wheels.sh` plus `--build-arg OFFLINE=1`: verified with `docker build --network=none`.
+  - `requirements.lock`.
+  - `k8s/` manifests.
+  - `CA_BUNDLE` support.
+
+### Deliberate behavior changes (not strictly backward compatible)
+
+1. `list_change_requests`:
+   - `query` was a raw encoded query appended verbatim; it is now free text over short_description and description.
+   - `assignment_group` was exact (sys_id) equality; it is now a partial name match (a sys_id still matches exactly).
+   - `state`, `type` and `category` labels are now resolved.
+
+   The one existing test that pinned the old raw behavior (`test_list_change_requests_with_filters`) was updated.
+2. Write tools are hidden unless `READ_ONLY=false`.
+3. An invalid `MCP_TOOL_PACKAGE`, or a missing tool config, now stops the server instead of serving zero tools.
+4. `pyproject.toml` bounds `pydantic<2.14`: mcp 1.3.0 fails to import with 2.14 (bisected: 2.13.0 works, 2.14.0 does not).
+5. `uv.lock` was re-locked (it lacked PyYAML). The only additions are pyyaml 6.0.3 and tzdata; every other pin is unchanged.
+
+### Not changed / remaining risks
+
+- The other tool modules (catalog, knowledge base, workflow, user, agile, …) still interpolate raw values into `sysparm_query`. Read tools are covered by the server-level `^` guard. Write tools are not, and they are only reachable with `READ_ONLY=false`. The `^^nameLIKE` construction in `user_tools.py:387,447` is still there.
+- `tool_packages.yaml` still lists the 11 non-existent tools. They are now reported at startup instead of ignored silently.
+- MCP stays at 1.3.0: SSE transport only (no streamable HTTP) and protocol `2024-11-05`. The `endpoint` event still uses a relative `/messages/` path, so a reverse proxy that adds a path prefix breaks it.
+- The SSE entrypoint supports Basic auth only, as before. OAuth/API-key configuration exists only in the stdio CLI.
+- The 15 pre-existing failing tests and 3 un-importable test modules (Part 1) are untouched.
+
+### Test results
+
+Run in `python:3.11-slim` with the dependency versions in `requirements.lock`, ignoring the 3 test modules that can't be imported at baseline:
+
+```
+baseline (0625060):  121 passed, 10 failed, 5 errors
+this branch (HEAD):  331 passed, 10 failed, 5 errors
+```
+
+The set of failing and erroring test IDs is **identical** to the baseline (diffed). There are 210 new tests:
+
+| File | Tests | Covers |
+|---|---|---|
+| `test_sanitize.py` | 30 | injection strings (`foo^ORnumberISNOTEMPTY`, `x^NQ…`, `^ORDERBY`, CR/LF/TAB/NUL/ESC/DEL), length, list parsing |
+| `test_query_precedence.py` | 5 | OR-group atomicity, ORDERBY last, IN |
+| `test_query_builder.py` | 34 | group partial/OR/exact/sys_id on all 4 tables, labels, dates with timezone, numbers and prefixes, injection before any HTTP call, limit cap, order whitelist, timeout and CA bundle passed |
+| `test_choices.py` | 8 | label/value/`1 - Critical`, unknown label lists valid ones, TTL expiry, `task` fallback, `sys_choice` 403 |
+| `test_dates.py` | 16 | Z/offset/naive, Asia/Jerusalem DST and winter, `DEFAULT_TIMEZONE`, invalid input |
+| `test_list_tools_http.py` | 79 | every list/get tool × {200-empty, 200-rows, 401, 403, 500, read/connect timeout, connection error, non-JSON}, not-found hint |
+| `test_check_access.py` | 6 | identity, roles, per-table counts, 401/403/500/timeout everywhere |
+| `test_server_startup.py` | 14 | READ_ONLY default/false/invalid, hidden write-tool call, bad package, missing/invalid config, packaged config, schema flattening, `^` guard |
+| `test_sse_auth.py` | 8 | 401 without or with a wrong token on `/sse` and `/messages/`, `/healthz` open, no-token mode, `debug=False` |
+| `test_logging_redaction.py` | 8 | `LOG_LEVEL`, DEBUG request log content, no Authorization/password/OAuth token in logs |
+| `test_smoke_test.py` | 2 | smoke test PASS on rows, FAIL on 401, never prints the password |
+
+### Container verification (local Docker, placeholder instance `https://example.invalid`)
+
+- `docker run --user 123456:0 --read-only --tmpfs /tmp …`:
+  - `/healthz` returns 200.
+  - The packaged config loads from site-packages.
+  - Log line: `Tool package 'full': 35 tools enabled, READ_ONLY=true, 53 write tools hidden.`
+- `servicenow-mcp-smoke --mcp-only --mcp-url http://localhost:8080/sse` connected with protocol `2024-11-05` and `tools/list` returned 36 tools (35 plus `list_tool_packages`), none using `anyOf`.
+- With `MCP_AUTH_TOKEN`:
+  - `GET /sse` without a token returns 401; `/healthz` returns 200.
+  - The MCP client with a wrong token fails with 401; with the right token it lists 36 tools.
+- `MCP_TOOL_PACKAGE=servicedesk` exits with code 2 and lists the valid names. Missing `SERVICENOW_*` variables also exit with code 2.
+- The ServiceNow checks against the unreachable host report `FAILED (connection)` with `query_used` for every call. They are never reported as 0 results.
+- `docker build --network=none --build-arg OFFLINE=1` succeeds from `wheelhouse/`.
+
+---
+
+## Part 3: Assumptions about your ServiceNow instance (verify manually)
+
+None of these could be checked here. Run `servicenow-mcp-smoke` in the pod first; it answers several of them.
+
+1. **`sys_choice` is readable** by the integration user (`check_access` → `tables.sys_choice.readable`). If it isn't, labels such as "New" cannot be translated for numeric fields; numeric values still work.
+2. **Choice rows location.**
+   - `incident.state` and `change_request.state/type/risk` have rows under their own table name.
+   - `priority`, and `state` on sc_request/sc_req_item, are inherited from `task`; the resolver falls back to `name=task`.
+   - Customized or extended choice lists on a child table are used as-is.
+3. **Choice labels are in the account's language.** Labels from all languages are accepted. The same label mapping to two values returns an "ambiguous" error.
+4. **`LIKE` is case-insensitive** on your database, so `noc` finds `INOC_1`. This is the default for ServiceNow's MySQL/MariaDB collations, but compare `search_groups("noc")` with `search_groups("NOC")` to confirm.
+5. **Datetime literals in `sysparm_query` are compared in UTC** (the internal GlideDateTime value), not in the integration user's timezone. Check: pick a record, convert its `sys_created_on` to UTC, and query `created_after` one minute before and after it.
+6. **`^OR` precedence (item 3):** `A^B^ORC` is `A AND (B OR C)`. Check by pasting a `query_used` into a list URL (`incident_list.do?sysparm_query=…`) and reading the breadcrumb.
+7. **Number prefixes are INC / CHG / REQ / RITM** (`sys_number`). If you changed them, the prefix validation in `tools/ticket_query.py` (`TableSpec.number_prefix`) must be adjusted.
+8. **`X-Total-Count` and row-level ACLs:** whether the header counts rows before or after "security constraints" removal. If `total_count` > `returned` on a page that isn't full, rows are being hidden.
+9. **Domain separation.** If it is enabled, the service account only sees its own domain (`check_access` → `user.domain`), and an empty result can be correct.
+10. **`sc_request`:** whether your process uses `request_state`, `state`, or both. The tool supports both filters.
+11. **Group names contain no commas**, since a comma separates the OR values. Otherwise pass a JSON array: `'["Name, with comma"]'`.
+12. **`assignment_group.name` is the display name** you see in lists. The display value comes from `sysparm_display_value=true`.
+13. **Dify:**
+    - Its version parses the tool schemas. They are now flat, but your exact version is unverified.
+    - It is configured with the **SSE** URL `http://<service>:8080/sse`. This server does not offer streamable HTTP.
+    - Your version can send a custom `Authorization` header if you set `MCP_AUTH_TOKEN`. If it can't, leave the token unset and rely on the NetworkPolicy.
+14. **Network and TLS:** the pod resolves and reaches the instance on 443. If an egress proxy is needed, set `HTTPS_PROXY`/`NO_PROXY`, which `requests` honors. A private CA needs `CA_BUNDLE`, and the NetworkPolicy CIDR must be filled in.
+15. **Basic auth works for the account:** it is not SSO-only and has no MFA, is a "web service access only" user or a normal user with a password, and is not blocked by REST API access policies or IP allowlists.
+16. **The account can read** `sys_user` (its own record) and `sys_user_has_role` for `check_access` identity and roles. This is optional; `check_access` reports when they can't be read.
+17. **If you expose the server through an OpenShift Route** rather than the in-cluster Service: there must be no path prefix (the SSE `endpoint` is the relative `/messages/`), and the route timeout must be long, e.g. `haproxy.router.openshift.io/timeout: 1h`.
+18. **`DEFAULT_TIMEZONE`** should match how users phrase dates, e.g. `Asia/Jerusalem`. It is UTC unless set.
