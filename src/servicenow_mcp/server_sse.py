@@ -706,7 +706,10 @@ def create_starlette_app(
     """Create a Starlette application serving MCP over SSE with OAuth 2.1 and multi-user auth."""
     sse = SseServerTransport("/messages/")
     sse_registry = SseSessionAuthRegistry()
-    store = session_store or OAuthSessionStore(session_ttl_seconds=settings.session_ttl_seconds())
+    store = session_store or OAuthSessionStore(
+        session_ttl_seconds=settings.session_ttl_seconds(),
+        absolute_lifetime_seconds=settings.session_absolute_lifetime_seconds(),
+    )
     broker = oauth_broker
 
     async def handle_mcp(request: Request) -> Response:

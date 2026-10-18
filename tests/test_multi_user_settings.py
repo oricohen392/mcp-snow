@@ -18,6 +18,7 @@ def test_default_multi_user_settings(monkeypatch):
         "SERVICENOW_API_KEY_HEADER",
         "ALLOW_SERVICE_ACCOUNT_FALLBACK",
         "SESSION_TTL_SECONDS",
+        "SESSION_ABSOLUTE_LIFETIME_SECONDS",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -31,6 +32,7 @@ def test_default_multi_user_settings(monkeypatch):
     assert settings.servicenow_api_key_header() == "x-sn-apikey"
     assert settings.allow_service_account_fallback() is False
     assert settings.session_ttl_seconds() == 86400
+    assert settings.session_absolute_lifetime_seconds() == 7 * 86400
 
 
 def test_configured_multi_user_settings(monkeypatch):
@@ -44,6 +46,7 @@ def test_configured_multi_user_settings(monkeypatch):
     monkeypatch.setenv("SERVICENOW_API_KEY_HEADER", "X-Custom-SN-Key")
     monkeypatch.setenv("ALLOW_SERVICE_ACCOUNT_FALLBACK", "true")
     monkeypatch.setenv("SESSION_TTL_SECONDS", "3600")
+    monkeypatch.setenv("SESSION_ABSOLUTE_LIFETIME_SECONDS", "7200")
 
     assert settings.mcp_public_url() == "https://mcp.example.com"
     assert settings.oidc_issuer_url() == "https://idp.example.com/realms/corp"
@@ -55,6 +58,7 @@ def test_configured_multi_user_settings(monkeypatch):
     assert settings.servicenow_api_key_header() == "X-Custom-SN-Key"
     assert settings.allow_service_account_fallback() is True
     assert settings.session_ttl_seconds() == 3600
+    assert settings.session_absolute_lifetime_seconds() == 7200
 
 
 def test_server_config_allows_none_auth_for_per_user_mode():

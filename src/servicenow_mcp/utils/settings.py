@@ -145,3 +145,8 @@ def session_ttl_seconds() -> int:
     """SESSION_TTL_SECONDS (default 86400, minimum 60): TTL for cached user sessions."""
     return _env_int("SESSION_TTL_SECONDS", 86400, minimum=60)
 
+
+def session_absolute_lifetime_seconds() -> int:
+    """SESSION_ABSOLUTE_LIFETIME_SECONDS (default 604800, minimum 60): Absolute lifetime ceiling for a session."""
+    return _env_int("SESSION_ABSOLUTE_LIFETIME_SECONDS", 7 * 86400, minimum=60)
+

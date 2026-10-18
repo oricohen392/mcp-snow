@@ -31,17 +31,18 @@ def verify_pkce_challenge(
     """Verify RFC 7636 PKCE code_verifier against code_challenge."""
     if not code_challenge or not code_verifier:
         return False
-    normalized_method = (method or "S256").upper()
-    try:
-        if normalized_method == "S256":
-            digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
-            computed = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-            return hmac.compare_digest(computed, code_challenge)
-        if normalized_method == "PLAIN":
-            return hmac.compare_digest(code_verifier, code_challenge)
-    except (UnicodeEncodeError, TypeError):
+    if not isinstance(code_verifier, str) or not isinstance(code_challenge, str):
         return False
-    return False
+    normalized_method = (method or "S256").upper()
+    if normalized_method != "S256":
+        return False
+    try:
+        digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+        computed = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+        target = code_challenge.strip().rstrip("=")
+        return hmac.compare_digest(computed, target)
+    except (UnicodeEncodeError, TypeError, AttributeError):
+        return False
 
 
 def validate_client_redirect_uri(uri: str) -> str:
@@ -77,6 +78,8 @@ class OAuthSession:
     expires_at: float
     session_expires_at: float
     user_hint: Optional[str] = None
+    client_id: Optional[str] = None
+    absolute_expires_at: float = 0.0
     refresh_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def is_access_token_expiring(self, buffer_seconds: int = 60) -> bool:
@@ -129,6 +132,7 @@ class OAuthSessionStore:
     def __init__(
         self,
         session_ttl_seconds: int = 86400,
+        absolute_lifetime_seconds: Optional[int] = None,
         pending_ttl_seconds: int = 600,
         auth_code_ttl_seconds: int = 60,
         max_sessions: int = 2048,
@@ -136,12 +140,13 @@ class OAuthSessionStore:
         max_clients: int = 2048,
     ):
         self._session_ttl = session_ttl_seconds
+        self._absolute_lifetime_seconds = absolute_lifetime_seconds or (self._session_ttl * 7)
         self._pending_ttl = pending_ttl_seconds
         self._code_ttl = auth_code_ttl_seconds
         self._max_sessions = max_sessions
         self._max_pending = max_pending
         self._max_clients = max_clients
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._sessions: Dict[str, OAuthSession] = {}
         self._refresh_index: Dict[str, str] = {}
         self._pending: Dict[str, PendingAuthRequest] = {}
@@ -150,7 +155,10 @@ class OAuthSessionStore:
 
     def _cleanup_locked(self, now: float) -> None:
         expired_sessions = [
-            tok for tok, sess in self._sessions.items() if sess.session_expires_at <= now
+            tok
+            for tok, sess in self._sessions.items()
+            if sess.session_expires_at <= now
+            or (sess.absolute_expires_at > 0 and sess.absolute_expires_at <= now)
         ]
         for tok in expired_sessions:
             sess = self._sessions.pop(tok, None)
@@ -165,17 +173,10 @@ class OAuthSessionStore:
         expired_pending = [st for st, p in self._pending.items() if p.expires_at <= now]
         for st in expired_pending:
             self._pending.pop(st, None)
-        while len(self._pending) >= self._max_pending:
-            oldest_st = next(iter(self._pending))
-            self._pending.pop(oldest_st, None)
 
         expired_codes = [c for c, obj in self._codes.items() if obj.expires_at <= now]
         for c in expired_codes:
             self._codes.pop(c, None)
-
-        while len(self._clients) >= self._max_clients:
-            oldest_client = next(iter(self._clients))
-            self._clients.pop(oldest_client, None)
 
     def create_session(
         self,
@@ -185,12 +186,14 @@ class OAuthSessionStore:
         token_type: str = "Bearer",
         expires_in: int = 1800,
         user_hint: Optional[str] = None,
+        client_id: Optional[str] = None,
         session_ttl_seconds: Optional[int] = None,
     ) -> OAuthSession:
         now = time.time()
         ttl = session_ttl_seconds or self._session_ttl
         mcp_token = f"mcp_{secrets.token_urlsafe(32)}"
         downstream_refresh = f"mcpr_{secrets.token_urlsafe(32)}"
+        absolute_expires_at = now + self._absolute_lifetime_seconds
         session = OAuthSession(
             mcp_token=mcp_token,
             downstream_refresh_token=downstream_refresh,
@@ -198,8 +201,10 @@ class OAuthSessionStore:
             refresh_token=refresh_token,
             token_type=token_type or "Bearer",
             expires_at=now + max(int(expires_in or 1800), 30),
-            session_expires_at=now + ttl,
+            session_expires_at=min(absolute_expires_at, now + ttl),
             user_hint=user_hint,
+            client_id=client_id,
+            absolute_expires_at=absolute_expires_at,
         )
         with self._lock:
             self._cleanup_locked(now)
@@ -215,7 +220,9 @@ class OAuthSessionStore:
             session = self._sessions.get(mcp_token)
             if not session:
                 return None
-            if session.session_expires_at <= now:
+            if session.session_expires_at <= now or (
+                session.absolute_expires_at > 0 and session.absolute_expires_at <= now
+            ):
                 self._sessions.pop(mcp_token, None)
                 self._refresh_index.pop(session.downstream_refresh_token, None)
                 return None
@@ -228,9 +235,12 @@ class OAuthSessionStore:
             return None
         with self._lock:
             mcp_token = self._refresh_index.get(downstream_refresh_token)
-        if not mcp_token:
-            return None
-        return self.get_session(mcp_token)
+            if not mcp_token:
+                return None
+            session = self.get_session(mcp_token)
+            if not session or session.downstream_refresh_token != downstream_refresh_token:
+                return None
+            return session
 
     def update_session_tokens(
         self,
@@ -245,7 +255,12 @@ class OAuthSessionStore:
         now = time.time()
         with self._lock:
             session = self._sessions.get(mcp_token)
-            if not session or session.session_expires_at <= now:
+            if not session:
+                return None
+            if session.session_expires_at <= now or (
+                session.absolute_expires_at > 0 and session.absolute_expires_at <= now
+            ):
+                self.revoke_session(mcp_token)
                 return None
             session.access_token = access_token
             if refresh_token:
@@ -253,7 +268,20 @@ class OAuthSessionStore:
             if token_type:
                 session.token_type = token_type
             session.expires_at = now + max(int(expires_in or 1800), 30)
-            session.session_expires_at = max(session.session_expires_at, now + self._session_ttl)
+            if session.absolute_expires_at > 0:
+                session.session_expires_at = min(
+                    session.absolute_expires_at, now + self._session_ttl
+                )
+            else:
+                session.session_expires_at = now + self._session_ttl
+
+            # Downstream refresh token rotation
+            old_refresh = session.downstream_refresh_token
+            self._refresh_index.pop(old_refresh, None)
+            new_refresh = f"mcpr_{secrets.token_urlsafe(32)}"
+            session.downstream_refresh_token = new_refresh
+            self._refresh_index[new_refresh] = session.mcp_token
+
             if user_hint:
                 session.user_hint = user_hint
             return session
@@ -296,6 +324,8 @@ class OAuthSessionStore:
         )
         with self._lock:
             self._cleanup_locked(now)
+            if len(self._pending) >= self._max_pending:
+                raise RuntimeError("Pending login capacity reached. Please try again later.")
             self._pending[upstream_state] = pending
         return pending
 
@@ -347,6 +377,10 @@ class OAuthSessionStore:
     def register_client(self, *, client_name: str, redirect_uris: List[str]) -> RegisteredClient:
         if not redirect_uris or not isinstance(redirect_uris, list):
             raise ValueError("redirect_uris must be a non-empty list")
+        if len(redirect_uris) > 20:
+            raise ValueError("Too many redirect_uris (max 20)")
+        if any(not isinstance(u, str) or len(u) > 1024 for u in redirect_uris):
+            raise ValueError("redirect_uri exceeds maximum length (1024)")
         validated_uris = [validate_client_redirect_uri(u) for u in redirect_uris]
         now = time.time()
         client_id = f"mcp_client_{secrets.token_urlsafe(16)}"
@@ -366,6 +400,8 @@ class OAuthSessionStore:
         )
         with self._lock:
             self._cleanup_locked(now)
+            if len(self._clients) >= self._max_clients:
+                raise ValueError("Client registration limit reached.")
             self._clients[client_id] = client
         return client
 
