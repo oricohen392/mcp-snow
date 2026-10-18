@@ -96,7 +96,10 @@ def mcp_public_url() -> Optional[str]:
 
 
 def oidc_issuer_url() -> Optional[str]:
-    """OIDC_ISSUER_URL: OIDC issuer URL for token validation / discovery (trailing slash stripped)."""
+    """
+    OIDC_ISSUER_URL: OIDC issuer URL for token validation / discovery
+    (trailing slash stripped).
+    """
     value = os.getenv("OIDC_ISSUER_URL", "").strip().rstrip("/")
     return value or None
 
@@ -132,12 +135,12 @@ def oauth_scopes() -> Optional[str]:
 
 
 def servicenow_api_key_header() -> str:
-    """SERVICENOW_API_KEY_HEADER (default 'x-sn-apikey'): header name for ServiceNow API key auth."""
+    """SERVICENOW_API_KEY_HEADER (default 'x-sn-apikey'): header for API key auth."""
     return os.getenv("SERVICENOW_API_KEY_HEADER", "").strip() or "x-sn-apikey"
 
 
 def allow_service_account_fallback() -> bool:
-    """ALLOW_SERVICE_ACCOUNT_FALLBACK (default false): allow falling back to service-account auth."""
+    """ALLOW_SERVICE_ACCOUNT_FALLBACK (default false): allow falling back to service account."""
     return _env_bool("ALLOW_SERVICE_ACCOUNT_FALLBACK", False)
 
 
@@ -147,12 +150,24 @@ def session_ttl_seconds() -> int:
 
 
 def session_absolute_lifetime_seconds() -> int:
-    """SESSION_ABSOLUTE_LIFETIME_SECONDS (default 604800, minimum 60): Absolute lifetime ceiling for a session."""
+    """
+    SESSION_ABSOLUTE_LIFETIME_SECONDS (default 604800, minimum 60):
+    Absolute lifetime ceiling for a session.
+    """
     return _env_int("SESSION_ABSOLUTE_LIFETIME_SECONDS", 7 * 86400, minimum=60)
 
 
 def require_oauth_consent() -> bool:
-    """REQUIRE_OAUTH_CONSENT (default false): require interactive user consent before redirecting to upstream IdP."""
+    """
+    REQUIRE_OAUTH_CONSENT (default false): require interactive user consent
+    before redirecting to upstream IdP.
+    """
     return _env_bool("REQUIRE_OAUTH_CONSENT", False)
 
 
+def allow_bearer_passthrough() -> bool:
+    """
+    ALLOW_BEARER_PASSTHROUGH (default false): allow unverified arbitrary Bearer tokens
+    to pass through.
+    """
+    return _env_bool("ALLOW_BEARER_PASSTHROUGH", False)
