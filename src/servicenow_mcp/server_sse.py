@@ -17,30 +17,33 @@ Endpoints:
 
 import argparse
 import hmac
-import html
 import json
 import logging
 import os
 import sys
-import time
 import uuid
-from typing import Any, Dict, Optional, Union
-from urllib.parse import parse_qs, urlencode, urlsplit
+from typing import Dict, Optional, Union
+from urllib.parse import parse_qs, urlsplit
 
+import mcp.types as types
 import uvicorn
 from dotenv import load_dotenv
-import mcp.types as types
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
 from starlette.datastructures import Headers
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from starlette.responses import (
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 from starlette.routing import Mount, Route
 
 from servicenow_mcp.auth.auth_manager import AuthManager
-from servicenow_mcp.auth.oauth_broker import OAuthBroker, OAuthBrokerError
+from servicenow_mcp.auth.oauth_broker import OAuthBroker
+from servicenow_mcp.auth.oauth_routes import create_oauth_routes
 from servicenow_mcp.auth.session_context import (
     CallerAuth,
     SseSessionAuthRegistry,
@@ -48,11 +51,7 @@ from servicenow_mcp.auth.session_context import (
     extract_jwt_user_hint,
     parse_basic_auth_username,
 )
-from servicenow_mcp.auth.session_store import (
-    OAuthSessionStore,
-    validate_client_redirect_uri,
-    verify_pkce_challenge,
-)
+from servicenow_mcp.auth.session_store import OAuthSessionStore
 from servicenow_mcp.server import ServiceNowMCP, ToolPackageConfigError
 from servicenow_mcp.utils import settings
 from servicenow_mcp.utils.config import AuthConfig, AuthType, BasicAuthConfig, ServerConfig
@@ -70,6 +69,7 @@ PUBLIC_PATHS = {
     "/oauth/callback",
     "/oauth/token",
     "/auth/login",
+    "/auth/logout",
 }
 
 
@@ -380,319 +380,6 @@ def _is_allowed_origin(origin: Optional[str], request: Request) -> bool:
     return False
 
 
-def _render_portal_html(*, base_url: str, mcp_token: str, expires_in: int, user_hint: Optional[str]) -> str:
-    safe_mcp_url = html.escape(f"{base_url}/mcp")
-    safe_sse_url = html.escape(f"{base_url}/sse")
-    safe_token = html.escape(mcp_token)
-    safe_user = html.escape(user_hint or "Authenticated ServiceNow User")
-    cursor_json = html.escape(
-        json.dumps(
-            {
-                "mcpServers": {
-                    "servicenow": {
-                        "url": f"{base_url}/mcp",
-                        "headers": {"Authorization": f"Bearer {mcp_token}"},
-                    }
-                }
-            },
-            indent=2,
-        )
-    )
-    claude_json = html.escape(
-        json.dumps(
-            {
-                "mcpServers": {
-                    "servicenow": {
-                        "command": "npx",
-                        "args": [
-                            "-y",
-                            "mcp-remote",
-                            f"{base_url}/sse",
-                            "--header",
-                            f"Authorization: Bearer {mcp_token}",
-                        ],
-                    }
-                }
-            },
-            indent=2,
-        )
-    )
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ServiceNow MCP — Self-Service Token Portal</title>
-  <style>
-    :root {{
-      --bg: #0f172a;
-      --card-bg: #1e293b;
-      --card-border: #334155;
-      --text-main: #f8fafc;
-      --text-muted: #94a3b8;
-      --accent: #38bdf8;
-      --accent-hover: #0ea5e9;
-      --code-bg: #0b1120;
-      --badge-bg: #064e3b;
-      --badge-text: #34d399;
-      --btn-bg: #334155;
-      --btn-hover: #475569;
-    }}
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-      background: var(--bg);
-      color: var(--text-main);
-      line-height: 1.6;
-      padding: 2.5rem 1rem;
-    }}
-    .container {{
-      max-width: 860px;
-      margin: 0 auto;
-    }}
-    header {{
-      margin-bottom: 2rem;
-      border-bottom: 1px solid var(--card-border);
-      padding-bottom: 1.5rem;
-    }}
-    .logo-row {{
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 0.75rem;
-      flex-wrap: wrap;
-      gap: 1rem;
-    }}
-    h1 {{
-      font-size: 1.6rem;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-    }}
-    .status-badge {{
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      background: var(--badge-bg);
-      color: var(--badge-text);
-      padding: 0.35rem 0.85rem;
-      border-radius: 9999px;
-      font-size: 0.85rem;
-      font-weight: 600;
-    }}
-    .status-dot {{
-      width: 8px;
-      height: 8px;
-      background: var(--badge-text);
-      border-radius: 50%;
-      box-shadow: 0 0 8px var(--badge-text);
-    }}
-    .user-info {{
-      color: var(--text-muted);
-      font-size: 0.95rem;
-    }}
-    .card {{
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 12px;
-      padding: 1.5rem;
-      margin-bottom: 1.5rem;
-      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
-    }}
-    .card-header {{
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 0.75rem;
-    }}
-    .card-title {{
-      font-size: 1.15rem;
-      font-weight: 600;
-      color: var(--text-main);
-    }}
-    .copy-btn {{
-      background: var(--btn-bg);
-      color: var(--text-main);
-      border: 1px solid var(--card-border);
-      padding: 0.35rem 0.85rem;
-      border-radius: 6px;
-      font-size: 0.85rem;
-      font-weight: 500;
-      cursor: pointer;
-      transition: all 0.15s ease;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.4rem;
-    }}
-    .copy-btn:hover {{
-      background: var(--btn-hover);
-      border-color: var(--text-muted);
-    }}
-    .copy-btn.copied {{
-      background: #064e3b;
-      color: #34d399;
-      border-color: #34d399;
-    }}
-    pre {{
-      background: var(--code-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 8px;
-      padding: 1rem;
-      overflow-x: auto;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 0.9rem;
-      color: #e2e8f0;
-      word-break: break-all;
-      white-space: pre-wrap;
-    }}
-    code {{
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      color: var(--accent);
-      background: rgba(56, 189, 248, 0.1);
-      padding: 0.15rem 0.35rem;
-      border-radius: 4px;
-      font-size: 0.88em;
-    }}
-    pre code {{
-      background: transparent;
-      padding: 0;
-      color: inherit;
-    }}
-    .meta-list {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 1rem;
-      margin-bottom: 1rem;
-    }}
-    .meta-item {{
-      background: var(--code-bg);
-      padding: 0.75rem 1rem;
-      border-radius: 8px;
-      border: 1px solid var(--card-border);
-    }}
-    .meta-label {{
-      font-size: 0.75rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--text-muted);
-      margin-bottom: 0.25rem;
-    }}
-    .meta-val {{
-      font-family: ui-monospace, monospace;
-      font-size: 0.9rem;
-      word-break: break-all;
-    }}
-    .instructions {{
-      font-size: 0.9rem;
-      color: var(--text-muted);
-      margin-bottom: 0.75rem;
-    }}
-    .logout-bar {{
-      display: flex;
-      justify-content: flex-end;
-      margin-top: 2rem;
-    }}
-    .logout-btn {{
-      background: transparent;
-      color: #f87171;
-      border: 1px solid #7f1d1d;
-      padding: 0.5rem 1.25rem;
-      border-radius: 6px;
-      font-size: 0.9rem;
-      cursor: pointer;
-      transition: all 0.15s ease;
-    }}
-    .logout-btn:hover {{
-      background: #7f1d1d;
-      color: #fef2f2;
-    }}
-  </style>
-</head>
-<body>
-  <div class="container">
-    <header>
-      <div class="logo-row">
-        <h1>ServiceNow MCP Server</h1>
-        <div class="status-badge">
-          <div class="status-dot"></div>
-          Connected
-        </div>
-      </div>
-      <p class="user-info">
-        Signed in as <strong>{safe_user}</strong> • Session active for <strong>{int(expires_in)}s</strong> • Upstream token automatically refreshed
-      </p>
-    </header>
-
-    <div class="card">
-      <div class="card-header">
-        <span class="card-title">1. Web AI Platforms (Dify / OpenWebUI / Agents)</span>
-        <button class="copy-btn" onclick="copyText('{safe_token}', this)">Copy Token</button>
-      </div>
-      <p class="instructions">Use these values when configuring the MCP tool in Dify or your agent framework:</p>
-      <div class="meta-list">
-        <div class="meta-item">
-          <div class="meta-label">Streamable HTTP URL (Recommended)</div>
-          <div class="meta-val">{safe_mcp_url}</div>
-        </div>
-        <div class="meta-item">
-          <div class="meta-label">Server SSE URL (Legacy)</div>
-          <div class="meta-val">{safe_sse_url}</div>
-        </div>
-        <div class="meta-item">
-          <div class="meta-label">Authorization Header</div>
-          <div class="meta-val">Bearer {safe_token[:16]}...</div>
-        </div>
-      </div>
-      <pre><code>{safe_token}</code></pre>
-    </div>
-
-    <div class="card">
-      <div class="card-header">
-        <span class="card-title">2. Cursor & Windsurf Configuration</span>
-        <button class="copy-btn" onclick="copyId('cursor-code', this)">Copy JSON</button>
-      </div>
-      <p class="instructions">Paste this into your <code>~/.cursor/mcp.json</code> or workspace <code>.cursor/mcp.json</code>:</p>
-      <pre id="cursor-code"><code>{cursor_json}</code></pre>
-    </div>
-
-    <div class="card">
-      <div class="card-header">
-        <span class="card-title">3. Claude Desktop Configuration</span>
-        <button class="copy-btn" onclick="copyId('claude-code', this)">Copy JSON</button>
-      </div>
-      <p class="instructions">Paste this into <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>:</p>
-      <pre id="claude-code"><code>{claude_json}</code></pre>
-    </div>
-
-    <div class="logout-bar">
-      <form action="/auth/logout" method="post">
-        <button type="submit" class="logout-btn">Log Out & Revoke Token</button>
-      </form>
-    </div>
-  </div>
-
-  <script>
-    function copyText(text, btn) {{
-      navigator.clipboard.writeText(text).then(() => {{
-        const original = btn.innerText;
-        btn.innerText = "Copied!";
-        btn.classList.add("copied");
-        setTimeout(() => {{
-          btn.innerText = original;
-          btn.classList.remove("copied");
-        }}, 2000);
-      }});
-    }}
-    function copyId(id, btn) {{
-      const el = document.getElementById(id);
-      if (el) {{
-        copyText(el.innerText, btn);
-      }}
-    }}
-  </script>
-</body>
-</html>"""
-
-
 def create_starlette_app(
     mcp_server: Server,
     *,
@@ -937,323 +624,11 @@ def create_starlette_app(
             if bound_session_id:
                 sse_registry.remove(bound_session_id)
 
-    async def oauth_protected_resource(request: Request) -> JSONResponse:
-        base_url = _external_base_url(request)
-        return JSONResponse(
-            {
-                "resource": base_url,
-                "authorization_servers": [base_url],
-                "bearer_methods_supported": ["header"],
-            },
-            headers={"Access-Control-Allow-Origin": "*"},
-        )
-
-    async def oauth_authorization_server(request: Request) -> JSONResponse:
-        base_url = _external_base_url(request)
-        return JSONResponse(
-            {
-                "issuer": base_url,
-                "authorization_endpoint": f"{base_url}/oauth/authorize",
-                "token_endpoint": f"{base_url}/oauth/token",
-                "registration_endpoint": f"{base_url}/oauth/register",
-                "response_types_supported": ["code"],
-                "grant_types_supported": ["authorization_code", "refresh_token"],
-                "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
-                "code_challenge_methods_supported": ["S256"],
-            },
-            headers={"Access-Control-Allow-Origin": "*"},
-        )
-
-    async def oauth_register(request: Request) -> JSONResponse:
-        try:
-            body = await request.json()
-        except Exception:  # noqa: BLE001
-            return JSONResponse({"error": "invalid_client_metadata"}, status_code=400)
-        if not isinstance(body, dict):
-            return JSONResponse({"error": "invalid_client_metadata"}, status_code=400)
-        try:
-            client = store.register_client(
-                client_name=str(body.get("client_name") or "MCP Client"),
-                redirect_uris=body.get("redirect_uris") or [],
-            )
-        except ValueError as e:
-            return JSONResponse(
-                {"error": "invalid_redirect_uri", "error_description": str(e)},
-                status_code=400,
-            )
-        return JSONResponse(
-            {
-                "client_id": client.client_id,
-                "client_name": client.client_name,
-                "redirect_uris": client.redirect_uris,
-                "grant_types": ["authorization_code", "refresh_token"],
-                "response_types": ["code"],
-                "token_endpoint_auth_method": "none",
-            },
-            status_code=201,
-        )
-
-    async def oauth_authorize(request: Request) -> Response:
-        if broker is None or not broker.is_configured():
-            return JSONResponse(
-                {
-                    "error": "server_error",
-                    "error_description": "OAuth/OIDC is not configured on this MCP server (set OAUTH_CLIENT_ID).",
-                },
-                status_code=501,
-            )
-        params = request.query_params
-        client_id = params.get("client_id", "")
-        redirect_uri = params.get("redirect_uri", "")
-        downstream_state = params.get("state", "")
-        code_challenge = params.get("code_challenge", "")
-        code_challenge_method = params.get("code_challenge_method", "S256")
-
-        if not redirect_uri or not code_challenge:
-            return JSONResponse(
-                {
-                    "error": "invalid_request",
-                    "error_description": "redirect_uri and PKCE code_challenge are required.",
-                },
-                status_code=400,
-            )
-        try:
-            validated_redirect = validate_client_redirect_uri(redirect_uri)
-        except ValueError as e:
-            return JSONResponse(
-                {"error": "invalid_request", "error_description": str(e)},
-                status_code=400,
-            )
-        if client_id:
-            registered = store.get_client(client_id)
-            if not registered:
-                return JSONResponse(
-                    {"error": "invalid_client", "error_description": f"Unknown client_id '{client_id}'."},
-                    status_code=400,
-                )
-            if validated_redirect not in registered.redirect_uris:
-                return JSONResponse(
-                    {
-                        "error": "invalid_request",
-                        "error_description": "redirect_uri does not match registered client.",
-                    },
-                    status_code=400,
-                )
-
-        pending = store.create_pending_auth(
-            flow_type="mcp_oauth",
-            client_id=client_id,
-            redirect_uri=validated_redirect,
-            downstream_state=downstream_state,
-            code_challenge=code_challenge,
-            code_challenge_method=code_challenge_method,
-        )
-        base_url = _external_base_url(request)
-        callback_uri = f"{base_url}/oauth/callback"
-        try:
-            upstream_url = broker.build_authorize_url(
-                redirect_uri=callback_uri,
-                state=pending.upstream_state,
-                code_challenge=pending.upstream_code_challenge,
-            )
-        except OAuthBrokerError as e:
-            return JSONResponse(
-                {"error": "server_error", "error_description": str(e)}, status_code=502
-            )
-        return RedirectResponse(url=upstream_url, status_code=302)
-
-    async def auth_login(request: Request) -> Response:
-        base_url = _external_base_url(request)
-        if broker is None or not broker.is_configured():
-            return HTMLResponse(
-                content=(
-                    "<!DOCTYPE html><html><body><h1>ServiceNow MCP Server</h1>"
-                    "<p>Interactive OAuth/OIDC login is not configured on this server. "
-                    "Connect by passing <code>Authorization: Bearer &lt;token&gt;</code> or "
-                    "<code>X-ServiceNow-API-Key: &lt;key&gt;</code> in your MCP client headers.</p>"
-                    "</body></html>"
-                ),
-                status_code=200,
-            )
-        pending = store.create_pending_auth(flow_type="portal")
-        callback_uri = f"{base_url}/oauth/callback"
-        try:
-            upstream_url = broker.build_authorize_url(
-                redirect_uri=callback_uri,
-                state=pending.upstream_state,
-                code_challenge=pending.upstream_code_challenge,
-            )
-        except OAuthBrokerError as e:
-            return HTMLResponse(
-                content=f"<h1>OAuth Configuration Error</h1><p>{html.escape(str(e))}</p>",
-                status_code=502,
-            )
-        return RedirectResponse(url=upstream_url, status_code=302)
-
-    async def oauth_callback(request: Request) -> Response:
-        if broker is None:
-            return JSONResponse({"error": "server_error"}, status_code=501)
-        params = request.query_params
-        error = params.get("error")
-        if error:
-            desc = params.get("error_description") or error
-            return HTMLResponse(
-                content=f"<h1>Authentication Failed</h1><p>{html.escape(desc)}</p>",
-                status_code=400,
-            )
-        code = params.get("code", "")
-        state = params.get("state", "")
-        pending = store.pop_pending_auth(state)
-        if not code or pending is None:
-            return HTMLResponse(
-                content="<h1>Invalid or Expired Login State</h1><p>Please restart login at <a href='/auth/login'>/auth/login</a>.</p>",
-                status_code=400,
-            )
-        base_url = _external_base_url(request)
-        callback_uri = f"{base_url}/oauth/callback"
-        try:
-            token_resp = broker.exchange_code_for_tokens(
-                code=code,
-                redirect_uri=callback_uri,
-                code_verifier=pending.upstream_code_verifier,
-            )
-        except OAuthBrokerError as e:
-            return HTMLResponse(
-                content=f"<h1>Token Exchange Failed</h1><p>{html.escape(str(e))}</p>",
-                status_code=502,
-            )
-
-        session = store.create_session(
-            access_token=token_resp.access_token,
-            refresh_token=token_resp.refresh_token,
-            token_type=token_resp.token_type,
-            expires_in=token_resp.expires_in,
-            user_hint=token_resp.user_hint,
-        )
-
-        if pending.flow_type == "mcp_oauth" and pending.redirect_uri:
-            issued_code = store.issue_auth_code(
-                mcp_token=session.mcp_token,
-                client_id=pending.client_id,
-                redirect_uri=pending.redirect_uri,
-                code_challenge=pending.code_challenge,
-                code_challenge_method=pending.code_challenge_method,
-            )
-            q = {"code": issued_code.code}
-            if pending.downstream_state:
-                q["state"] = pending.downstream_state
-            sep = "&" if "?" in pending.redirect_uri else "?"
-            return RedirectResponse(
-                url=f"{pending.redirect_uri}{sep}{urlencode(q)}", status_code=302
-            )
-
-        ttl = int(session.session_expires_at - session.expires_at + token_resp.expires_in)
-        return HTMLResponse(
-            content=_render_portal_html(
-                base_url=base_url,
-                mcp_token=session.mcp_token,
-                expires_in=ttl,
-                user_hint=session.user_hint,
-            ),
-            status_code=200,
-        )
-
-    async def oauth_token(request: Request) -> JSONResponse:
-        content_type = (request.headers.get("content-type") or "").lower()
-        body_bytes = await request.body()
-        data: Dict[str, Any] = {}
-        if "application/json" in content_type:
-            try:
-                data = json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
-            except Exception:
-                data = {}
-        else:
-            qs = parse_qs(body_bytes.decode("utf-8", errors="ignore"))
-            data = {k: v[0] for k, v in qs.items() if v}
-
-        grant_type = str(data.get("grant_type") or "")
-
-        if grant_type == "authorization_code":
-            code = str(data.get("code") or "")
-            code_verifier = str(data.get("code_verifier") or "")
-            redirect_uri = str(data.get("redirect_uri") or "")
-            issued = store.consume_auth_code(code)
-            if issued is None:
-                return JSONResponse(
-                    {"error": "invalid_grant", "error_description": "Invalid or expired code."},
-                    status_code=400,
-                )
-            if issued.redirect_uri and (not redirect_uri or issued.redirect_uri != redirect_uri):
-                return JSONResponse(
-                    {"error": "invalid_grant", "error_description": "redirect_uri mismatch or missing."},
-                    status_code=400,
-                )
-            client_id = str(data.get("client_id") or "")
-            if issued.client_id and client_id and issued.client_id != client_id:
-                return JSONResponse(
-                    {"error": "invalid_grant", "error_description": "client_id mismatch."},
-                    status_code=400,
-                )
-            if not verify_pkce_challenge(
-                code_verifier, issued.code_challenge, issued.code_challenge_method
-            ):
-                return JSONResponse(
-                    {"error": "invalid_grant", "error_description": "PKCE verification failed."},
-                    status_code=400,
-                )
-            session = store.get_session(issued.mcp_token)
-            if session is None:
-                return JSONResponse({"error": "invalid_grant"}, status_code=400)
-            return JSONResponse(
-                {
-                    "access_token": session.mcp_token,
-                    "token_type": "Bearer",
-                    "expires_in": max(int(session.session_expires_at - time.time()), 60),
-                    "refresh_token": session.downstream_refresh_token,
-                }
-            )
-
-        if grant_type == "refresh_token":
-            refresh_tok = str(data.get("refresh_token") or "")
-            session = store.get_session_by_downstream_refresh_token(refresh_tok)
-            if session is None:
-                return JSONResponse(
-                    {"error": "invalid_grant", "error_description": "Unknown refresh_token."},
-                    status_code=400,
-                )
-            if session.refresh_token and broker is not None and broker.is_configured():
-                with session.refresh_lock:
-                    try:
-                        refreshed = broker.refresh_access_token(session.refresh_token)
-                        store.update_session_tokens(
-                            session.mcp_token,
-                            access_token=refreshed.access_token,
-                            refresh_token=refreshed.refresh_token,
-                            token_type=refreshed.token_type,
-                            expires_in=refreshed.expires_in,
-                            user_hint=refreshed.user_hint,
-                        )
-                    except OAuthBrokerError as e:
-                        return JSONResponse(
-                            {"error": "invalid_grant", "error_description": str(e)},
-                            status_code=400,
-                        )
-            return JSONResponse(
-                {
-                    "access_token": session.mcp_token,
-                    "token_type": "Bearer",
-                    "expires_in": max(int(session.session_expires_at - time.time()), 60),
-                    "refresh_token": session.downstream_refresh_token,
-                }
-            )
-
-        return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
-
-    async def auth_logout(request: Request) -> JSONResponse:
-        caller_auth: Optional[CallerAuth] = request.scope.get("caller_auth")
-        if caller_auth and caller_auth.session_id:
-            store.revoke_session(caller_auth.session_id)
-        return JSONResponse({"status": "logged_out"})
+    oauth_routes = create_oauth_routes(
+        store=store,
+        broker=broker,
+        external_base_url_fn=_external_base_url,
+    )
 
     use_multi_auth = require_auth or (auth_manager is not None)
     middleware = [Middleware(SecurityHeadersMiddleware)]
@@ -1274,20 +649,14 @@ def create_starlette_app(
         debug=debug,
         routes=[
             Route(HEALTH_PATH, endpoint=healthz),
-            Route("/.well-known/oauth-protected-resource", endpoint=oauth_protected_resource),
-            Route("/.well-known/oauth-authorization-server", endpoint=oauth_authorization_server),
-            Route("/oauth/register", endpoint=oauth_register, methods=["POST"]),
-            Route("/oauth/authorize", endpoint=oauth_authorize, methods=["GET"]),
-            Route("/oauth/callback", endpoint=oauth_callback, methods=["GET"]),
-            Route("/oauth/token", endpoint=oauth_token, methods=["POST"]),
-            Route("/auth/login", endpoint=auth_login, methods=["GET"]),
-            Route("/auth/logout", endpoint=auth_logout, methods=["POST"]),
+            *oauth_routes,
             Route("/mcp", endpoint=handle_mcp, methods=["GET", "POST", "DELETE"]),
             Route("/sse", endpoint=handle_sse),
             Mount("/messages/", app=sse.handle_post_message),
         ],
         middleware=middleware,
     )
+
 
 
 class ServiceNowSSEMCP(ServiceNowMCP):

@@ -126,6 +126,17 @@ class RegisteredClient:
     created_at: float
 
 
+@dataclass
+class ConsentTicket:
+    """Short-lived interactive consent confirmation ticket."""
+
+    ticket: str = field(repr=False)
+    client_id: str
+    redirect_uri: str
+    code_challenge: str
+    expires_at: float
+
+
 class OAuthSessionStore:
     """Thread-safe in-memory storage for OAuth sessions, pending states, codes, and clients."""
 
@@ -152,6 +163,7 @@ class OAuthSessionStore:
         self._pending: Dict[str, PendingAuthRequest] = {}
         self._codes: Dict[str, IssuedAuthCode] = {}
         self._clients: Dict[str, RegisteredClient] = {}
+        self._consent_tickets: Dict[str, ConsentTicket] = {}
 
     def _cleanup_locked(self, now: float) -> None:
         expired_sessions = [
@@ -177,6 +189,10 @@ class OAuthSessionStore:
         expired_codes = [c for c, obj in self._codes.items() if obj.expires_at <= now]
         for c in expired_codes:
             self._codes.pop(c, None)
+
+        expired_tickets = [t for t, obj in self._consent_tickets.items() if obj.expires_at <= now]
+        for t in expired_tickets:
+            self._consent_tickets.pop(t, None)
 
     def create_session(
         self,
@@ -410,3 +426,47 @@ class OAuthSessionStore:
             return None
         with self._lock:
             return self._clients.get(client_id)
+
+    def create_consent_ticket(
+        self,
+        *,
+        client_id: str,
+        redirect_uri: str,
+        code_challenge: str,
+        ttl_seconds: int = 300,
+    ) -> str:
+        now = time.time()
+        ticket = f"mcpt_{secrets.token_urlsafe(24)}"
+        with self._lock:
+            self._cleanup_locked(now)
+            self._consent_tickets[ticket] = ConsentTicket(
+                ticket=ticket,
+                client_id=client_id,
+                redirect_uri=redirect_uri,
+                code_challenge=code_challenge,
+                expires_at=now + ttl_seconds,
+            )
+        return ticket
+
+    def consume_consent_ticket(
+        self,
+        ticket: str,
+        *,
+        client_id: str,
+        redirect_uri: str,
+        code_challenge: str,
+    ) -> bool:
+        if not ticket:
+            return False
+        now = time.time()
+        with self._lock:
+            stored = self._consent_tickets.pop(ticket, None)
+            if not stored or stored.expires_at <= now:
+                return False
+            if (
+                stored.client_id != client_id
+                or stored.redirect_uri != redirect_uri
+                or stored.code_challenge != code_challenge
+            ):
+                return False
+            return True

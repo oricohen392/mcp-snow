@@ -150,3 +150,9 @@ def session_absolute_lifetime_seconds() -> int:
     """SESSION_ABSOLUTE_LIFETIME_SECONDS (default 604800, minimum 60): Absolute lifetime ceiling for a session."""
     return _env_int("SESSION_ABSOLUTE_LIFETIME_SECONDS", 7 * 86400, minimum=60)
 
+
+def require_oauth_consent() -> bool:
+    """REQUIRE_OAUTH_CONSENT (default false): require interactive user consent before redirecting to upstream IdP."""
+    return _env_bool("REQUIRE_OAUTH_CONSENT", False)
+
+
