@@ -136,6 +136,85 @@ class BearerAuthMiddleware:
         await self.app(scope, receive, send)
 
 
+MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024  # 4 MB payload cap to prevent memory exhaustion DoS
+
+
+class SecurityHeadersMiddleware:
+    """
+    Pure ASGI middleware injecting HTTP security hardening headers and enforcing max body size.
+    """
+
+    def __init__(self, app, max_body_bytes: int = MAX_REQUEST_BODY_BYTES):
+        self.app = app
+        self._max_body_bytes = max_body_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = Headers(scope=scope)
+        cl_str = headers.get("content-length")
+        if cl_str:
+            try:
+                if int(cl_str) > self._max_body_bytes:
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": 413,
+                            "headers": [
+                                (b"content-type", b"application/json; charset=utf-8"),
+                                (b"x-content-type-options", b"nosniff"),
+                                (b"x-frame-options", b"DENY"),
+                                (b"referrer-policy", b"no-referrer"),
+                            ],
+                        }
+                    )
+                    await send(
+                        {
+                            "type": "http.response.body",
+                            "body": b'{"error":"payload_too_large","message":"Payload exceeds 4MB limit"}',
+                        }
+                    )
+                    return
+            except (ValueError, TypeError):
+                pass
+
+        async def send_with_security_headers(message):
+            if message["type"] == "http.response.start":
+                resp_headers = list(message.get("headers", []))
+                resp_headers.append((b"x-content-type-options", b"nosniff"))
+                resp_headers.append((b"x-frame-options", b"DENY"))
+                resp_headers.append((b"referrer-policy", b"no-referrer"))
+                resp_headers.append(
+                    (
+                        b"content-security-policy",
+                        b"default-src 'self'; script-src 'self' 'unsafe-inline'; "
+                        b"style-src 'self' 'unsafe-inline'; frame-ancestors 'none'",
+                    )
+                )
+
+                path = scope.get("path", "")
+                if (
+                    path in ("/mcp", "/sse", "/auth/login", "/auth/logout")
+                    or path.startswith("/oauth/")
+                    or path.startswith("/messages")
+                ):
+                    resp_headers.append((b"cache-control", b"no-store, no-cache, must-revalidate"))
+                    resp_headers.append((b"pragma", b"no-cache"))
+
+                proto = headers.get("x-forwarded-proto") or scope.get("scheme")
+                if proto == "https":
+                    resp_headers.append(
+                        (b"strict-transport-security", b"max-age=31536000; includeSubDomains")
+                    )
+
+                message["headers"] = resp_headers
+            await send(message)
+
+        await self.app(scope, receive, send_with_security_headers)
+
+
 class MultiAuthMiddleware:
     """
     Pure ASGI middleware resolving per-user ServiceNow credentials or OAuth sessions.
@@ -1174,8 +1253,9 @@ def create_starlette_app(
         return JSONResponse({"status": "logged_out"})
 
     use_multi_auth = require_auth or (auth_manager is not None)
+    middleware = [Middleware(SecurityHeadersMiddleware)]
     if use_multi_auth:
-        middleware = [
+        middleware.append(
             Middleware(
                 MultiAuthMiddleware,
                 auth_manager=auth_manager,
@@ -1183,11 +1263,9 @@ def create_starlette_app(
                 sse_registry=sse_registry,
                 auth_token=auth_token,
             )
-        ]
+        )
     elif auth_token:
-        middleware = [Middleware(BearerAuthMiddleware, token=auth_token)]
-    else:
-        middleware = []
+        middleware.append(Middleware(BearerAuthMiddleware, token=auth_token))
 
     return Starlette(
         debug=debug,

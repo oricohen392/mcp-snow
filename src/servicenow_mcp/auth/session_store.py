@@ -350,9 +350,17 @@ class OAuthSessionStore:
         validated_uris = [validate_client_redirect_uri(u) for u in redirect_uris]
         now = time.time()
         client_id = f"mcp_client_{secrets.token_urlsafe(16)}"
+        clean_name = (
+            "".join(
+                c
+                for c in (client_name or "MCP Client")
+                if c.isprintable() and c not in ("\r", "\n", "\t")
+            )[:100].strip()
+            or "MCP Client"
+        )
         client = RegisteredClient(
             client_id=client_id,
-            client_name=(client_name or "MCP Client").strip(),
+            client_name=clean_name,
             redirect_uris=validated_uris,
             created_at=now,
         )
