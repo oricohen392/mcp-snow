@@ -10,7 +10,7 @@ from servicenow_mcp.auth.auth_manager import AuthManager
 from servicenow_mcp.auth.oauth_broker import OAuthBroker
 from servicenow_mcp.auth.session_context import CallerAuth, caller_auth_context
 from servicenow_mcp.auth.session_store import OAuthSessionStore
-from servicenow_mcp.utils.config import AuthConfig, AuthType, BasicAuthConfig
+from servicenow_mcp.utils.config import AuthConfig, AuthType, BasicAuthConfig, OAuthConfig
 
 
 def _jwt(claims: dict) -> str:
@@ -137,3 +137,31 @@ def test_auth_manager_raises_when_no_caller_and_no_service_account():
     manager = AuthManager(AuthConfig(type=AuthType.NONE), "https://acme.service-now.com")
     with pytest.raises(ValueError, match="Per-user authentication is required"):
         manager.get_headers()
+
+
+def test_auth_manager_oauth_service_account_custom_domain():
+    oauth_config = OAuthConfig(client_id="cid", client_secret="csecret")
+    manager = AuthManager(
+        AuthConfig(type=AuthType.OAUTH, oauth=oauth_config),
+        "https://custom-domain.corp.internal/",
+    )
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "access_token": "custom-token-xyz",
+        "token_type": "Bearer",
+    }
+    with patch("requests.post", return_value=mock_resp) as mock_post:
+        headers = manager.get_headers()
+        assert mock_post.call_count == 1
+        call_args = mock_post.call_args
+        assert call_args[0][0] == "https://custom-domain.corp.internal/oauth_token.do"
+        assert headers["Authorization"] == "Bearer custom-token-xyz"
+
+
+def test_auth_manager_oauth_service_account_missing_instance_url():
+    oauth_config = OAuthConfig(client_id="cid", client_secret="csecret")
+    manager = AuthManager(AuthConfig(type=AuthType.OAUTH, oauth=oauth_config))
+    with pytest.raises(ValueError, match="Instance URL is required for OAuth authentication"):
+        manager.get_headers()
+
