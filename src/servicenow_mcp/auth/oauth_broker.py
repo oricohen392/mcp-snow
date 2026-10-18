@@ -10,13 +10,15 @@ Supports:
 """
 
 import base64
+import functools
 import logging
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
-from urllib.parse import urlencode
+from urllib.parse import quote_plus, urlencode
 
+import anyio.to_thread
 import requests
 
 from servicenow_mcp.auth.session_context import extract_jwt_user_hint
@@ -230,6 +232,51 @@ class OAuthBroker:
         }
         return self._post_token_request(data, fallback_refresh_token=refresh_token)
 
+    async def async_get_endpoints(self) -> OAuthEndpoints:
+        """Resolve upstream authorization and token endpoints asynchronously."""
+        return await anyio.to_thread.run_sync(self.get_endpoints)
+
+    async def async_build_authorize_url(
+        self,
+        *,
+        redirect_uri: str,
+        state: str,
+        code_challenge: Optional[str] = None,
+        code_challenge_method: str = "S256",
+        scope: Optional[str] = None,
+    ) -> str:
+        """Build the upstream browser authorization URL asynchronously."""
+        func = functools.partial(
+            self.build_authorize_url,
+            redirect_uri=redirect_uri,
+            state=state,
+            code_challenge=code_challenge,
+            code_challenge_method=code_challenge_method,
+            scope=scope,
+        )
+        return await anyio.to_thread.run_sync(func)
+
+    async def async_exchange_code_for_tokens(
+        self,
+        *,
+        code: str,
+        redirect_uri: str,
+        code_verifier: Optional[str] = None,
+    ) -> UpstreamTokenResponse:
+        """Exchange an authorization code asynchronously without blocking the event loop."""
+        func = functools.partial(
+            self.exchange_code_for_tokens,
+            code=code,
+            redirect_uri=redirect_uri,
+            code_verifier=code_verifier,
+        )
+        return await anyio.to_thread.run_sync(func)
+
+    async def async_refresh_access_token(self, refresh_token: str) -> UpstreamTokenResponse:
+        """Exchange a refresh_token for a fresh access_token asynchronously."""
+        return await anyio.to_thread.run_sync(self.refresh_access_token, refresh_token)
+
+
     def _post_token_request(
         self,
         data: Dict[str, Any],
@@ -249,8 +296,9 @@ class OAuthBroker:
             "Content-Type": "application/x-www-form-urlencoded",
         }
         if client_secret:
-            form_data["client_secret"] = client_secret
-            basic_raw = f"{client_id}:{client_secret}".encode("utf-8")
+            quoted_id = quote_plus(client_id)
+            quoted_secret = quote_plus(client_secret)
+            basic_raw = f"{quoted_id}:{quoted_secret}".encode("utf-8")
             headers["Authorization"] = f"Basic {base64.b64encode(basic_raw).decode('ascii')}"
 
         try:
@@ -290,14 +338,16 @@ class OAuthBroker:
             expires_in = 1800
 
         id_token = payload.get("id_token")
+        raw_user_name = payload.get("user_name")
+        user_name_val = (
+            raw_user_name.strip()
+            if isinstance(raw_user_name, str) and raw_user_name.strip()
+            else None
+        )
         user_hint = (
             (extract_jwt_user_hint(id_token) if isinstance(id_token, str) else None)
             or extract_jwt_user_hint(access_token)
-            or (
-                str(payload["user_name"]).strip()
-                if isinstance(payload.get("user_name"), str) and payload.get("user_name").strip()
-                else None
-            )
+            or user_name_val
         )
 
         return UpstreamTokenResponse(

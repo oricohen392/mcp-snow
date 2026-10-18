@@ -1,7 +1,10 @@
-"""Tests for OAuthBroker (OIDC discovery & ServiceNow OAuth) and AuthManager ContextVar resolution."""
+"""
+Tests for OAuthBroker (OIDC discovery & ServiceNow OAuth) and AuthManager ContextVar resolution.
+"""
 
 import base64
 import json
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -164,4 +167,110 @@ def test_auth_manager_oauth_service_account_missing_instance_url():
     manager = AuthManager(AuthConfig(type=AuthType.OAUTH, oauth=oauth_config))
     with pytest.raises(ValueError, match="Instance URL is required for OAuth authentication"):
         manager.get_headers()
+
+
+def test_post_token_request_avoids_duplicate_client_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OAUTH_CLIENT_ID", "my-client-id")
+    monkeypatch.setenv("OAUTH_CLIENT_SECRET", "my-client-secret")
+    broker = OAuthBroker(instance_url="https://acme.service-now.com")
+
+    captured_kwargs: dict = {}
+
+    def fake_post(url: str, **kwargs: Any) -> MagicMock:
+        captured_kwargs.update(kwargs)
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {
+            "access_token": "tok-1",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        }
+        return resp
+
+    with patch("requests.post", side_effect=fake_post):
+        broker.exchange_code_for_tokens(
+            code="code-123",
+            redirect_uri="http://127.0.0.1:8000/callback",
+        )
+
+    # Basic auth header MUST be present
+    assert "Authorization" in captured_kwargs["headers"]
+    assert captured_kwargs["headers"]["Authorization"].startswith("Basic ")
+    # client_secret MUST NOT be in the form body (RFC 6749 §2.3: do not use multiple auth methods)
+    assert "client_secret" not in captured_kwargs["data"]
+    assert captured_kwargs["data"]["client_id"] == "my-client-id"
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_oauth_broker_async_wrappers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OAUTH_CLIENT_ID", "async-client")
+    monkeypatch.setenv("OAUTH_CLIENT_SECRET", "async-secret")
+    broker = OAuthBroker(instance_url="https://acme.service-now.com")
+
+    token_resp = MagicMock()
+    token_resp.status_code = 200
+    token_resp.json.return_value = {
+        "access_token": "async-acc",
+        "refresh_token": "async-ref",
+        "token_type": "Bearer",
+        "expires_in": 1800,
+    }
+
+    with patch("requests.post", return_value=token_resp):
+        res = await broker.async_exchange_code_for_tokens(
+            code="code-abc",
+            redirect_uri="http://127.0.0.1:8000/callback",
+        )
+        assert res.access_token == "async-acc"
+
+        ref = await broker.async_refresh_access_token("async-ref")
+        assert ref.access_token == "async-acc"
+
+    auth_url = await broker.async_build_authorize_url(
+        redirect_uri="http://127.0.0.1:8000/callback",
+        state="s1",
+    )
+    assert "oauth_auth.do" in auth_url
+
+    endpoints = await broker.async_get_endpoints()
+    assert endpoints.authorization_endpoint == "https://acme.service-now.com/oauth_auth.do"
+
+
+def test_post_token_request_public_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OAUTH_CLIENT_ID", "public-client-id")
+    monkeypatch.delenv("OAUTH_CLIENT_SECRET", raising=False)
+    broker = OAuthBroker(instance_url="https://acme.service-now.com")
+
+    captured_kwargs = {}
+
+    def fake_post(url, **kwargs):
+        captured_kwargs.update(kwargs)
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {
+            "access_token": "tok-pub",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        }
+        return resp
+
+    with patch("requests.post", side_effect=fake_post):
+        broker.exchange_code_for_tokens(
+            code="code-pub",
+            redirect_uri="http://127.0.0.1:8000/callback",
+        )
+
+    # For public clients, no Authorization header is attached
+    assert "Authorization" not in captured_kwargs["headers"]
+    assert captured_kwargs["data"]["client_id"] == "public-client-id"
+    assert "client_secret" not in captured_kwargs["data"]
+
+
 
