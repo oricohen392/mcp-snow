@@ -87,3 +87,61 @@ def tls_verify():
 def servicenow_timeout() -> int:
     """SERVICENOW_TIMEOUT (default 30): HTTP timeout in seconds for ServiceNow calls."""
     return _env_int("SERVICENOW_TIMEOUT", 30)
+
+
+def mcp_public_url() -> Optional[str]:
+    """MCP_PUBLIC_URL: public base URL of this MCP server (trailing slash stripped)."""
+    value = os.getenv("MCP_PUBLIC_URL", "").strip().rstrip("/")
+    return value or None
+
+
+def oidc_issuer_url() -> Optional[str]:
+    """OIDC_ISSUER_URL: OIDC issuer URL for token validation / discovery (trailing slash stripped)."""
+    value = os.getenv("OIDC_ISSUER_URL", "").strip().rstrip("/")
+    return value or None
+
+
+def oauth_client_id() -> Optional[str]:
+    """OAUTH_CLIENT_ID: OAuth client ID for per-user OAuth / OIDC flows."""
+    value = os.getenv("OAUTH_CLIENT_ID", "").strip()
+    return value or None
+
+
+def oauth_client_secret() -> Optional[str]:
+    """OAUTH_CLIENT_SECRET: OAuth client secret for per-user OAuth / OIDC flows."""
+    value = os.getenv("OAUTH_CLIENT_SECRET", "").strip()
+    return value or None
+
+
+def oauth_authorize_url() -> Optional[str]:
+    """OAUTH_AUTHORIZE_URL: explicit OAuth authorization endpoint URL."""
+    value = os.getenv("OAUTH_AUTHORIZE_URL", "").strip()
+    return value or None
+
+
+def oauth_token_url() -> Optional[str]:
+    """OAUTH_TOKEN_URL: explicit OAuth token endpoint URL."""
+    value = os.getenv("OAUTH_TOKEN_URL", "").strip()
+    return value or None
+
+
+def oauth_scopes() -> Optional[str]:
+    """OAUTH_SCOPES: space-delimited OAuth scopes requested during authorization."""
+    value = os.getenv("OAUTH_SCOPES", "").strip()
+    return value or None
+
+
+def servicenow_api_key_header() -> str:
+    """SERVICENOW_API_KEY_HEADER (default 'x-sn-apikey'): header name for ServiceNow API key auth."""
+    return os.getenv("SERVICENOW_API_KEY_HEADER", "").strip() or "x-sn-apikey"
+
+
+def allow_service_account_fallback() -> bool:
+    """ALLOW_SERVICE_ACCOUNT_FALLBACK (default false): allow falling back to service-account auth."""
+    return _env_bool("ALLOW_SERVICE_ACCOUNT_FALLBACK", False)
+
+
+def session_ttl_seconds() -> int:
+    """SESSION_TTL_SECONDS (default 86400, minimum 60): TTL for cached user sessions."""
+    return _env_int("SESSION_TTL_SECONDS", 86400, minimum=60)
+

@@ -17,3 +17,21 @@ data:
   MAX_LIMIT: "100"
   DEFAULT_TIMEZONE: "UTC"      # e.g. "Asia/Jerusalem"; used for dates given without an offset
   CHOICE_CACHE_TTL_SECONDS: "3600"
+
+  # Centralized Multi-User / OAuth / OIDC Configuration
+  # External public base URL of this MCP server (used for OAuth discovery & callbacks)
+  # MCP_PUBLIC_URL: "https://mcp-snow.example.com"
+  # OIDC issuer URL for auto-discovery (.well-known/openid-configuration)
+  # OIDC_ISSUER_URL: "https://login.microsoftonline.com/<tenant-id>/v2.0"
+  # Explicit OAuth endpoints (optional override if not using OIDC discovery)
+  # OAUTH_AUTHORIZE_URL: "https://your-instance.service-now.com/oauth_auth.do"
+  # OAUTH_TOKEN_URL: "https://your-instance.service-now.com/oauth_token.do"
+  # Space-delimited scopes requested during OAuth authorization
+  # OAUTH_SCOPES: "openid profile email"
+  # Header used when clients pass X-ServiceNow-API-Key (default: x-sn-apikey)
+  SERVICENOW_API_KEY_HEADER: "x-sn-apikey"
+  # Require per-user auth by default. Set to "true" only to allow service-account fallback.
+  ALLOW_SERVICE_ACCOUNT_FALLBACK: "false"
+  # Lifetime in seconds for mcp_<token> user sessions (default: 86400)
+  SESSION_TTL_SECONDS: "86400"
+

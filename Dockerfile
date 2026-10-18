@@ -41,7 +41,7 @@ RUN set -eux; \
 FROM ${PYTHON_IMAGE}
 
 LABEL org.opencontainers.image.title="servicenow-mcp" \
-      org.opencontainers.image.description="ServiceNow MCP server (SSE transport)"
+      org.opencontainers.image.description="ServiceNow MCP server (Streamable HTTP & SSE transport)"
 
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -59,5 +59,8 @@ WORKDIR /tmp
 USER 1001
 
 EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')" || exit 1
 
 CMD ["servicenow-mcp-sse"]

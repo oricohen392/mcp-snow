@@ -4,11 +4,13 @@ check_access (who are we, and what can this account see per table).
 """
 
 import logging
+from typing import Optional
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
 from servicenow_mcp.auth.auth_manager import AuthManager
+from servicenow_mcp.auth.session_context import get_current_caller_auth
 from servicenow_mcp.tools.ticket_query import EMPTY_RESULT_HINT, display
 from servicenow_mcp.utils import settings
 from servicenow_mcp.utils.config import ServerConfig
@@ -113,27 +115,40 @@ class CheckAccessParams(BaseModel):
 
 
 def _user_identity(config: ServerConfig, auth_manager: AuthManager) -> dict:
+    caller_auth = get_current_caller_auth()
     auth = getattr(config, "auth", None)
     basic = getattr(auth, "basic", None)
     username = getattr(basic, "username", None)
     if not username:
         oauth = getattr(auth, "oauth", None)
         username = getattr(oauth, "username", None)
-    auth_type = getattr(auth, "type", None)
+    auth_type_obj = getattr(auth, "type", None)
+    auth_type_str = getattr(auth_type_obj, "value", str(auth_type_obj))
+
+    if caller_auth is not None and caller_auth.auth_source != "service_account":
+        auth_type_str = caller_auth.auth_source
+        username = caller_auth.user_hint
+
     identity = {
         "configured_username": username,
-        "auth_type": getattr(auth_type, "value", str(auth_type)),
+        "auth_type": auth_type_str,
     }
-    if not username:
-        identity["verified"] = False
-        identity["note"] = "No username configured (API key / client credentials); identity unknown."
-        return identity
 
-    try:
-        query = QueryBuilder().eq("user_name", username).build()
-    except QueryInputError as e:
+    if username:
+        try:
+            field_name = "email" if "@" in username else "user_name"
+            query = QueryBuilder().eq(field_name, username).build()
+        except QueryInputError as e:
+            identity["verified"] = False
+            identity["note"] = str(e)
+            return identity
+    elif caller_auth is not None and caller_auth.auth_source != "service_account":
+        query = "sys_id=javascript:gs.getUserID()"
+    else:
         identity["verified"] = False
-        identity["note"] = str(e)
+        identity["note"] = (
+            "No username configured (API key / client credentials); identity unknown."
+        )
         return identity
     result = sn_get(
         config,
@@ -171,28 +186,38 @@ def _user_identity(config: ServerConfig, auth_manager: AuthManager) -> dict:
         }
     )
 
-    roles = sn_get(
-        config,
-        auth_manager,
-        "table/sys_user_has_role",
-        {
-            "sysparm_query": QueryBuilder().eq("user", identity["sys_id"]).build(),
-            "sysparm_fields": "role",
-            "sysparm_limit": 200,
-            "sysparm_display_value": "true",
-            "sysparm_exclude_reference_link": "true",
-        },
-    )
-    if roles.ok:
-        identity["roles"] = sorted({str(display(r.get("role"))) for r in roles.records})
+    roles_result = None
+    if identity.get("sys_id"):
+        try:
+            role_query = QueryBuilder().eq("user", identity["sys_id"]).build()
+            roles_result = sn_get(
+                config,
+                auth_manager,
+                "table/sys_user_has_role",
+                {
+                    "sysparm_query": role_query,
+                    "sysparm_fields": "role",
+                    "sysparm_limit": 200,
+                    "sysparm_display_value": "true",
+                    "sysparm_exclude_reference_link": "true",
+                },
+            )
+            if roles_result.ok:
+                identity["roles"] = sorted({str(display(r.get("role"))) for r in roles_result.records})
+            else:
+                identity["roles"] = None
+                identity["roles_note"] = f"Could not read sys_user_has_role (HTTP {roles_result.status_code})"
+        except QueryInputError:
+            identity["roles"] = None
+            identity["roles_note"] = "Invalid sys_id for role lookup"
     else:
         identity["roles"] = None
-        identity["roles_note"] = f"Could not read sys_user_has_role (HTTP {roles.status_code})"
+
     return identity
 
 
 def check_access(
-    config: ServerConfig, auth_manager: AuthManager, params: CheckAccessParams = None
+    config: ServerConfig, auth_manager: AuthManager, params: Optional[CheckAccessParams] = None
 ) -> dict:
     """Report who the server authenticates as and what each ITSM table shows to that account."""
     tables = {}

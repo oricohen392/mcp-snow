@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 class AuthType(str, Enum):
     """Authentication types supported by the ServiceNow MCP server."""
 
+    NONE = "none"
     BASIC = "basic"
     OAUTH = "oauth"
     API_KEY = "api_key"
@@ -28,8 +29,8 @@ class OAuthConfig(BaseModel):
 
     client_id: str
     client_secret: str
-    username: str
-    password: str
+    username: Optional[str] = None
+    password: Optional[str] = None
     token_url: Optional[str] = None
 
 
@@ -43,7 +44,7 @@ class ApiKeyConfig(BaseModel):
 class AuthConfig(BaseModel):
     """Authentication configuration."""
 
-    type: AuthType
+    type: AuthType = AuthType.NONE
     basic: Optional[BasicAuthConfig] = None
     oauth: Optional[OAuthConfig] = None
     api_key: Optional[ApiKeyConfig] = None
@@ -53,7 +54,7 @@ class ServerConfig(BaseModel):
     """Server configuration."""
 
     instance_url: str
-    auth: AuthConfig
+    auth: AuthConfig = Field(default_factory=AuthConfig)
     debug: bool = False
     timeout: int = 30
 

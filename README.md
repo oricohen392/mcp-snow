@@ -133,22 +133,143 @@ uvicorn.run(app, host="0.0.0.0", port=8080)
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SERVICENOW_INSTANCE_URL` | required | e.g. `https://acme.service-now.com` |
-| `SERVICENOW_USERNAME` / `SERVICENOW_PASSWORD` | required | Basic auth account used for every call |
+| `SERVICENOW_INSTANCE_URL` | required | Target ServiceNow instance, e.g. `https://acme.service-now.com` |
+| `ALLOW_SERVICE_ACCOUNT_FALLBACK` | `false` | When `false` (default), requires per-user authentication. When `true`, allows requests to fall back to the service account |
+| `SERVICENOW_USERNAME` / `SERVICENOW_PASSWORD` | required if fallback enabled | Basic auth account used only when `ALLOW_SERVICE_ACCOUNT_FALLBACK=true` |
+| `MCP_PUBLIC_URL` | inferred from request | External public base URL of this MCP server (e.g. `https://mcp-snow.example.com`) |
+| `OIDC_ISSUER_URL` | unset | Upstream OIDC issuer URL for auto-discovery (`.well-known/openid-configuration`) |
+| `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` | unset | Upstream OAuth 2.0 / OIDC client credentials |
+| `OAUTH_AUTHORIZE_URL` | `<instance>/oauth_auth.do` | Explicit OAuth authorization endpoint (used if `OIDC_ISSUER_URL` is unset) |
+| `OAUTH_TOKEN_URL` | `<instance>/oauth_token.do` | Explicit OAuth token endpoint (used if `OIDC_ISSUER_URL` is unset) |
+| `OAUTH_SCOPES` | `openid profile email` or `""` | Space-delimited scopes requested during OAuth authorization |
+| `SERVICENOW_API_KEY_HEADER` | `x-sn-apikey` | Outbound header name for ServiceNow API key auth when client supplies `X-ServiceNow-API-Key` |
+| `SESSION_TTL_SECONDS` | `86400` | In-memory lifetime in seconds for user sessions (`mcp_<token>`) |
+| `MCP_AUTH_TOKEN` | unset | When `ALLOW_SERVICE_ACCOUNT_FALLBACK=true`, `Authorization: Bearer <token>` matching this value selects the service account |
 | `SERVICENOW_TIMEOUT` | `30` | HTTP timeout (seconds) for ServiceNow calls |
 | `CA_BUNDLE` | unset | PEM bundle used to verify the ServiceNow TLS certificate |
 | `READ_ONLY` | `true` | Write tools (create/update/resolve/approve...) are registered only when `false` |
 | `MCP_TOOL_PACKAGE` | `full` | Package from `config/tool_packages.yaml`; an unknown name fails startup |
-| `MCP_AUTH_TOKEN` | unset | If set, `/sse` and `/messages/` require `Authorization: Bearer <token>` |
 | `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8080` | Bind address |
 | `LOG_LEVEL` | `INFO` | `DEBUG` logs each ServiceNow request: method, path, sysparm params, status, ms (never headers/credentials) |
 | `MAX_LIMIT` | `100` | Upper bound for any list tool's `limit` |
 | `DEFAULT_TIMEZONE` | `UTC` | IANA zone for dates given without an offset |
 | `CHOICE_CACHE_TTL_SECONDS` | `3600` | Cache TTL for `sys_choice` label lookups |
 
-### Endpoint security
+### Centralized Multi-User Architecture & Authentication
 
-`GET /sse` and `POST /messages/` are **unauthenticated unless `MCP_AUTH_TOKEN` is set**. Without a token, anyone who can reach the port can call the tools as the ServiceNow service account, so restrict access with `k8s/networkpolicy.yaml`. `GET /healthz` is always open and makes no ServiceNow call. Sessions are held in memory, so run **one replica**.
+By default (`ALLOW_SERVICE_ACCOUNT_FALLBACK=false`), the server operates as a centralized multi-user MCP gateway. Users do **not** need to install anything locally. Every tool invocation executes against ServiceNow under the calling user's individual identity and ServiceNow roles.
+
+The server supports two network transports simultaneously:
+- **Streamable HTTP (Recommended)**: Single unified endpoint at `/mcp` supporting `POST`, `GET`, `DELETE`, per-request authentication, and streaming responses.
+- **Server-Sent Events (SSE - Legacy)**: Dual-leg transport at `/sse` (events stream) + `/messages/` (message POSTs).
+
+Sessions and authorization flows are held in memory, so deploy **one replica** behind your Service/Ingress. `GET /healthz` is always open and makes no ServiceNow call.
+
+#### Connecting from Cursor, VS Code, and Claude Desktop
+
+Users can connect directly over HTTP without local installation:
+
+##### Option 1: Native MCP OAuth 2.1 (Recommended)
+The server supports the MCP OAuth 2.1 specification (`/.well-known/oauth-protected-resource`, RFC 7591 Dynamic Client Registration, PKCE Authorization Code).
+Configure your MCP client settings (e.g. `~/.cursor/mcp.json` or Claude Desktop configuration):
+
+```json
+{
+  "mcpServers": {
+    "servicenow": {
+      "url": "https://mcp-snow.example.com/mcp"
+    }
+  }
+}
+```
+
+When connecting, the client initiates the OAuth flow, opens the browser for SSO sign-in via the enterprise IdP (Okta, Entra ID, Keycloak) or ServiceNow, and securely stores the session token. Access tokens are refreshed automatically in the background.
+
+##### Option 2: ServiceNow API Key
+Users with an individual ServiceNow REST API Key can supply it via headers:
+
+```json
+{
+  "mcpServers": {
+    "servicenow": {
+      "url": "https://mcp-snow.example.com/mcp",
+      "headers": {
+        "X-ServiceNow-API-Key": "your-personal-api-key"
+      }
+    }
+  }
+}
+```
+
+##### Option 3: Self-Service Portal (`/auth/login`)
+Users can open `https://mcp-snow.example.com/auth/login` in any web browser, sign in via SSO, and copy a generated `mcp_<token>`:
+
+```json
+{
+  "mcpServers": {
+    "servicenow": {
+      "url": "https://mcp-snow.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer mcp_your_token_here"
+      }
+    }
+  }
+}
+```
+
+#### Connecting from Dify & Web AI Platforms
+
+Dify connects over HTTP to the server endpoint (`https://mcp-snow.example.com/mcp` for Streamable HTTP or `https://mcp-snow.example.com/sse` for SSE):
+
+##### Option 1: User / Session Token from `/auth/login`
+A user or bot administrator visits `https://mcp-snow.example.com/auth/login`, authenticates via SSO, and copies the session token. In Dify's tool/provider configuration, add the header:
+- `Authorization: Bearer mcp_<token>`
+
+##### Option 2: Header Pass-Through (API Key or Bearer Token)
+Directly pass credentials through Dify's custom headers:
+- `X-ServiceNow-API-Key: <key>`
+or
+- `Authorization: Bearer <upstream-oidc-jwt>`
+
+##### Option 3: Shared Service Account Fallback (Opt-In)
+For shared departmental bots that do not represent an individual user, configure `ALLOW_SERVICE_ACCOUNT_FALLBACK=true` on the server and pass the shared secret in Dify:
+- `Authorization: Bearer <MCP_AUTH_TOKEN>`
+Requests with this token execute using the ServiceNow service account credentials (`SERVICENOW_USERNAME` / `SERVICENOW_PASSWORD`).
+
+### Docker & Docker Compose Deployment
+
+#### Quickstart with Docker Compose
+
+1. Copy `.env.example` to `.env` and fill in your ServiceNow instance and OAuth/OIDC credentials:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Start the containerized multi-user server:
+   ```bash
+   docker compose up -d
+   ```
+
+3. Check health:
+   ```bash
+   curl http://localhost:8080/healthz
+   # {"status":"ok"}
+   ```
+
+#### Running Directly with Docker
+
+```bash
+docker run -d \
+  --name servicenow-mcp \
+  -p 8080:8080 \
+  -e SERVICENOW_INSTANCE_URL="https://acme.service-now.com" \
+  -e OAUTH_CLIENT_ID="your-client-id" \
+  -e OAUTH_CLIENT_SECRET="your-client-secret" \
+  -e MCP_PUBLIC_URL="http://localhost:8080" \
+  -e READ_ONLY="true" \
+  servicenow-mcp:latest
+```
+
 
 ### Query tools and transparency
 

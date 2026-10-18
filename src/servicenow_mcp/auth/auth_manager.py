@@ -10,6 +10,9 @@ from typing import Dict, Optional
 import requests
 from requests.auth import HTTPBasicAuth
 
+from servicenow_mcp.auth.oauth_broker import OAuthBroker, OAuthBrokerError
+from servicenow_mcp.auth.session_context import get_current_caller_auth
+from servicenow_mcp.auth.session_store import OAuthSessionStore
 from servicenow_mcp.utils import settings
 from servicenow_mcp.utils.config import AuthConfig, AuthType
 
@@ -22,21 +25,35 @@ class AuthManager:
     Authentication manager for ServiceNow API.
     
     This class handles authentication with the ServiceNow API using
-    different authentication methods.
+    per-user request context (CallerAuth) or service-account fallback.
     """
     
-    def __init__(self, config: AuthConfig, instance_url: str = None):
+    def __init__(
+        self,
+        config: AuthConfig,
+        instance_url: str = None,
+        session_store: Optional[OAuthSessionStore] = None,
+        oauth_broker: Optional[OAuthBroker] = None,
+    ):
         """
         Initialize the authentication manager.
         
         Args:
             config: Authentication configuration.
             instance_url: ServiceNow instance URL.
+            session_store: Optional store for centralized OAuth/OIDC user sessions.
+            oauth_broker: Optional upstream OAuth/OIDC broker for token refresh.
         """
         self.config = config
         self.instance_url = instance_url
+        self.session_store = session_store
+        self.oauth_broker = oauth_broker
         self.token: Optional[str] = None
         self.token_type: Optional[str] = None
+
+    def has_service_account(self) -> bool:
+        """Return True when a fallback service account is configured."""
+        return self.config is not None and self.config.type != AuthType.NONE
     
     def get_headers(self) -> Dict[str, str]:
         """
@@ -49,7 +66,53 @@ class AuthManager:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+
+        caller_auth = get_current_caller_auth()
+        if caller_auth is not None and caller_auth.auth_source != "service_account":
+            if caller_auth.session_id and self.session_store is not None:
+                session = self.session_store.get_session(caller_auth.session_id)
+                if session is None:
+                    raise ValueError(
+                        "OAuth session has expired or was not found. Please re-authenticate via /auth/login."
+                    )
+                if (
+                    session.is_access_token_expiring()
+                    and session.refresh_token
+                    and self.oauth_broker is not None
+                ):
+                    with session.refresh_lock:
+                        if session.is_access_token_expiring() and session.refresh_token:
+                            try:
+                                refreshed = self.oauth_broker.refresh_access_token(
+                                    session.refresh_token
+                                )
+                                updated = self.session_store.update_session_tokens(
+                                    session.mcp_token,
+                                    access_token=refreshed.access_token,
+                                    refresh_token=refreshed.refresh_token,
+                                    token_type=refreshed.token_type,
+                                    expires_in=refreshed.expires_in,
+                                    user_hint=refreshed.user_hint,
+                                )
+                                if updated is not None:
+                                    session = updated
+                            except OAuthBrokerError as exc:
+                                raise ValueError(
+                                    f"Failed to refresh expiring OAuth access token: {exc}"
+                                ) from exc
+
+                headers["Authorization"] = f"{session.token_type} {session.access_token}"
+                return headers
+
+            headers.update(caller_auth.headers)
+            return headers
         
+        if self.config.type == AuthType.NONE:
+            raise ValueError(
+                "Per-user authentication is required; no user credentials found in request context "
+                "and no service account fallback is active."
+            )
+
         if self.config.type == AuthType.BASIC:
             if not self.config.basic:
                 raise ValueError("Basic auth configuration is required")

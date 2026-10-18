@@ -1,0 +1,44 @@
+services:
+  servicenow-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: servicenow-mcp:latest
+    container_name: servicenow-mcp
+    restart: unless-stopped
+    ports:
+      - "${MCP_PORT:-8080}:8080"
+    environment:
+      # ServiceNow Instance Configuration
+      - SERVICENOW_INSTANCE_URL=${SERVICENOW_INSTANCE_URL:?SERVICENOW_INSTANCE_URL is required}
+      - SERVICENOW_TIMEOUT=${SERVICENOW_TIMEOUT:-30}
+
+      # Multi-User OAuth / OIDC Configuration
+      - MCP_PUBLIC_URL=${MCP_PUBLIC_URL:-http://localhost:8080}
+      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-}
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}
+      - OAUTH_AUTHORIZE_URL=${OAUTH_AUTHORIZE_URL:-}
+      - OAUTH_TOKEN_URL=${OAUTH_TOKEN_URL:-}
+      - OAUTH_SCOPES=${OAUTH_SCOPES:-}
+      - SERVICENOW_API_KEY_HEADER=${SERVICENOW_API_KEY_HEADER:-x-sn-apikey}
+      - SESSION_TTL_SECONDS=${SESSION_TTL_SECONDS:-86400}
+
+      # Security & Tool Controls (Safe by default: Read-Only, no service account fallback)
+      - READ_ONLY=${READ_ONLY:-true}
+      - ALLOW_SERVICE_ACCOUNT_FALLBACK=${ALLOW_SERVICE_ACCOUNT_FALLBACK:-false}
+      - SERVICENOW_USERNAME=${SERVICENOW_USERNAME:-}
+      - SERVICENOW_PASSWORD=${SERVICENOW_PASSWORD:-}
+      - MCP_AUTH_TOKEN=${MCP_AUTH_TOKEN:-}
+      - MCP_TOOL_PACKAGE=${MCP_TOOL_PACKAGE:-full}
+
+      # Server Runtime Settings
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8080
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
