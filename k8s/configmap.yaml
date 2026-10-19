@@ -19,7 +19,8 @@ data:
   CHOICE_CACHE_TTL_SECONDS: "3600"
 
   # Centralized Multi-User / OAuth / OIDC Configuration
-  # External public base URL of this MCP server (used for OAuth discovery & callbacks)
+  # External public base URL of this MCP server (used for OAuth discovery & callbacks).
+  # Strongly recommended in production to prevent Host header injection and guarantee consistent OAuth metadata.
   # MCP_PUBLIC_URL: "https://mcp-snow.example.com"
   # OIDC issuer URL for auto-discovery (.well-known/openid-configuration)
   # OIDC_ISSUER_URL: "https://login.microsoftonline.com/<tenant-id>/v2.0"
@@ -32,6 +33,13 @@ data:
   SERVICENOW_API_KEY_HEADER: "x-sn-apikey"
   # Require per-user auth by default. Set to "true" only to allow service-account fallback.
   ALLOW_SERVICE_ACCOUNT_FALLBACK: "false"
-  # Lifetime in seconds for mcp_<token> user sessions (default: 86400)
+  # Lifetime in seconds for mcp_<token> user sessions before refresh (default: 86400 / 24h)
   SESSION_TTL_SECONDS: "86400"
+  # Absolute lifetime ceiling in seconds regardless of token refreshes (default: 604800 / 7 days)
+  SESSION_ABSOLUTE_LIFETIME_SECONDS: "604800"
+  # Require interactive user consent on /oauth/authorize before redirecting to IdP (default: false)
+  REQUIRE_OAUTH_CONSENT: "false"
+  # Allow unverified arbitrary bearer tokens (default: false — requires OIDC JWT or registered session)
+  ALLOW_BEARER_PASSTHROUGH: "false"
+
 
