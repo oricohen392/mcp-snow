@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 _ERROR_HINTS = {
     "unauthorized": "ServiceNow rejected the credentials (HTTP 401). "
-    "Check SERVICENOW_USERNAME / SERVICENOW_PASSWORD and that the account is not locked.",
+    "Verify your OAuth/OIDC token, API key, or service account credentials, or re-authenticate via /auth/login.",
     "forbidden": "ServiceNow denied access (HTTP 403). The integration user lacks a role or "
     "table-level ACL for this table. Run check_access to see which tables are readable.",
     "not_found": "ServiceNow returned HTTP 404 (unknown table, record or API path).",

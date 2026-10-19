@@ -9,6 +9,7 @@ import requests
 from fake_servicenow import make_response
 
 from servicenow_mcp.auth.auth_manager import AuthManager
+from servicenow_mcp.auth.session_context import CallerAuth, caller_auth_context
 from servicenow_mcp.tools.access_tools import ACCESS_CHECK_TABLES, CheckAccessParams, check_access
 from servicenow_mcp.utils.config import AuthConfig, AuthType, BasicAuthConfig, ServerConfig
 
@@ -88,3 +89,129 @@ def test_timeout_is_failure(config, auth):
     assert result["success"] is False
     assert result["error_type"] == "timeout"
     assert result["status_code"] is None
+
+
+def test_check_access_uses_caller_auth_user_hint():
+    cfg = ServerConfig(
+        instance_url="https://acme.service-now.com",
+        auth=AuthConfig(type=AuthType.NONE),
+    )
+    mgr = AuthManager(cfg.auth, cfg.instance_url)
+
+    def fake_get(url, params=None, **kwargs):
+        table = url.rsplit("/", 1)[1]
+        if table == "sys_user":
+            assert params["sysparm_query"] == "user_name=alice.oidc"
+            return make_response(
+                200,
+                {
+                    "result": [
+                        {
+                            "sys_id": "a" * 32,
+                            "user_name": "alice.oidc",
+                            "name": "Alice OIDC",
+                            "active": "true",
+                        }
+                    ]
+                },
+            )
+        if table == "sys_user_has_role":
+            return make_response(200, {"result": [{"role": "itil"}]})
+        return make_response(200, {"result": [{"sys_id": "x"}]}, total=10)
+
+    with caller_auth_context(
+        CallerAuth(
+            headers={"Authorization": "Bearer user-jwt"},
+            auth_source="oauth_session",
+            user_hint="alice.oidc",
+        )
+    ):
+        result = _run(cfg, mgr, fake_get)
+
+    assert result["success"] is True
+    assert result["user"]["verified"] is True
+    assert result["user"]["user_name"] == "alice.oidc"
+    assert result["user"]["auth_type"] == "oauth_session"
+
+
+def test_check_access_falls_back_to_gs_get_user_id_when_no_username():
+    cfg = ServerConfig(
+        instance_url="https://acme.service-now.com",
+        auth=AuthConfig(type=AuthType.NONE),
+    )
+    mgr = AuthManager(cfg.auth, cfg.instance_url)
+
+    def fake_get(url, params=None, **kwargs):
+        table = url.rsplit("/", 1)[1]
+        if table == "sys_user":
+            assert params["sysparm_query"] == "sys_id=javascript:gs.getUserID()"
+            return make_response(
+                200,
+                {
+                    "result": [
+                        {
+                            "sys_id": "b" * 32,
+                            "user_name": "apikey.user",
+                            "name": "API Key User",
+                            "active": "true",
+                        }
+                    ]
+                },
+            )
+        if table == "sys_user_has_role":
+            return make_response(200, {"result": [{"role": "itil"}]})
+        return make_response(200, {"result": [{"sys_id": "x"}]}, total=5)
+
+    with caller_auth_context(
+        CallerAuth(headers={"x-sn-apikey": "key-1"}, auth_source="api_key")
+    ):
+        result = _run(cfg, mgr, fake_get)
+
+    assert result["success"] is True
+    assert result["user"]["verified"] is True
+    assert result["user"]["user_name"] == "apikey.user"
+    assert result["user"]["auth_type"] == "api_key"
+
+
+def test_check_access_uses_email_query_when_user_hint_has_at():
+    cfg = ServerConfig(
+        instance_url="https://acme.service-now.com",
+        auth=AuthConfig(type=AuthType.NONE),
+    )
+    mgr = AuthManager(cfg.auth, cfg.instance_url)
+
+    def fake_get(url, params=None, **kwargs):
+        table = url.rsplit("/", 1)[1]
+        if table == "sys_user":
+            assert params["sysparm_query"] == "email=alice@example.com"
+            return make_response(
+                200,
+                {
+                    "result": [
+                        {
+                            "sys_id": "a" * 32,
+                            "user_name": "alice",
+                            "name": "Alice Example",
+                            "active": "true",
+                        }
+                    ]
+                },
+            )
+        if table == "sys_user_has_role":
+            return make_response(200, {"result": [{"role": "itil"}]})
+        return make_response(200, {"result": [{"sys_id": "x"}]}, total=10)
+
+    with caller_auth_context(
+        CallerAuth(
+            headers={"Authorization": "Bearer user-jwt"},
+            auth_source="oauth_session",
+            user_hint="alice@example.com",
+        )
+    ):
+        result = _run(cfg, mgr, fake_get)
+
+    assert result["success"] is True
+    assert result["user"]["verified"] is True
+    assert result["user"]["user_name"] == "alice"
+
+

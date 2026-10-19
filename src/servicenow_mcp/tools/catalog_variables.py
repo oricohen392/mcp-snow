@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 
 from servicenow_mcp.auth.auth_manager import AuthManager
 from servicenow_mcp.utils.config import ServerConfig
+from servicenow_mcp.utils.query import QueryBuilder, QueryInputError
+from servicenow_mcp.utils.url import SafeUrlError, safe_table_url
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +96,6 @@ def create_catalog_item_variable(
     Returns:
         Response with information about the created variable.
     """
-    api_url = f"{config.instance_url}/api/now/table/item_option_new"
-
     # Build request data
     data = {
         "cat_item": params.catalog_item_id,
@@ -126,6 +126,7 @@ def create_catalog_item_variable(
 
     # Make request
     try:
+        api_url = safe_table_url(config.instance_url, "item_option_new")
         response = requests.post(
             api_url,
             json=data,
@@ -143,7 +144,7 @@ def create_catalog_item_variable(
             details=result,
         )
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to create catalog item variable: {e}")
         return CatalogItemVariableResponse(
             success=False,
@@ -168,15 +169,13 @@ def list_catalog_item_variables(
         Response with a list of variables for the catalog item.
     """
     # Build query parameters
-    query_params = {
-        "sysparm_query": f"cat_item={params.catalog_item_id}^ORDERBYorder",
-    }
-    
+    query_params = {}
+
     if params.limit:
         query_params["sysparm_limit"] = params.limit
     if params.offset:
         query_params["sysparm_offset"] = params.offset
-    
+
     # Include all fields if detailed info is requested
     if params.include_details:
         query_params["sysparm_display_value"] = "true"
@@ -184,10 +183,12 @@ def list_catalog_item_variables(
     else:
         query_params["sysparm_fields"] = "sys_id,name,type,question_text,order,mandatory"
 
-    api_url = f"{config.instance_url}/api/now/table/item_option_new"
-
     # Make request
     try:
+        query_params["sysparm_query"] = (
+            QueryBuilder().eq("cat_item", params.catalog_item_id).order_by("order").build()
+        )
+        api_url = safe_table_url(config.instance_url, "item_option_new")
         response = requests.get(
             api_url,
             params=query_params,
@@ -197,7 +198,7 @@ def list_catalog_item_variables(
         response.raise_for_status()
 
         result = response.json().get("result", [])
-        
+
         return ListCatalogItemVariablesResponse(
             success=True,
             message=f"Retrieved {len(result)} variables for catalog item",
@@ -205,7 +206,7 @@ def list_catalog_item_variables(
             count=len(result),
         )
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to list catalog item variables: {e}")
         return ListCatalogItemVariablesResponse(
             success=False,
@@ -229,41 +230,40 @@ def update_catalog_item_variable(
     Returns:
         Response with information about the updated variable.
     """
-    api_url = f"{config.instance_url}/api/now/table/item_option_new/{params.variable_id}"
-
-    # Build request data with only parameters that are provided
-    data = {}
-    
-    if params.label is not None:
-        data["question_text"] = params.label
-    if params.mandatory is not None:
-        data["mandatory"] = str(params.mandatory).lower()  # ServiceNow expects "true"/"false" strings
-    if params.help_text is not None:
-        data["help_text"] = params.help_text
-    if params.default_value is not None:
-        data["default_value"] = params.default_value
-    if params.description is not None:
-        data["description"] = params.description
-    if params.order is not None:
-        data["order"] = params.order
-    if params.reference_qualifier is not None:
-        data["reference_qual"] = params.reference_qualifier
-    if params.max_length is not None:
-        data["max_length"] = params.max_length
-    if params.min is not None:
-        data["min"] = params.min
-    if params.max is not None:
-        data["max"] = params.max
-
-    # If no fields to update, return early
-    if not data:
-        return CatalogItemVariableResponse(
-            success=False,
-            message="No update parameters provided",
-        )
-
-    # Make request
     try:
+        api_url = safe_table_url(config.instance_url, "item_option_new", params.variable_id)
+
+        # Build request data with only parameters that are provided
+        data = {}
+
+        if params.label is not None:
+            data["question_text"] = params.label
+        if params.mandatory is not None:
+            data["mandatory"] = str(params.mandatory).lower()  # ServiceNow expects "true"/"false" strings
+        if params.help_text is not None:
+            data["help_text"] = params.help_text
+        if params.default_value is not None:
+            data["default_value"] = params.default_value
+        if params.description is not None:
+            data["description"] = params.description
+        if params.order is not None:
+            data["order"] = params.order
+        if params.reference_qualifier is not None:
+            data["reference_qual"] = params.reference_qualifier
+        if params.max_length is not None:
+            data["max_length"] = params.max_length
+        if params.min is not None:
+            data["min"] = params.min
+        if params.max is not None:
+            data["max"] = params.max
+
+        # If no fields to update, return early
+        if not data:
+            return CatalogItemVariableResponse(
+                success=False,
+                message="No update parameters provided",
+            )
+
         response = requests.patch(
             api_url,
             json=data,
@@ -281,7 +281,7 @@ def update_catalog_item_variable(
             details=result,
         )
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to update catalog item variable: {e}")
         return CatalogItemVariableResponse(
             success=False,

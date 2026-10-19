@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 
 from servicenow_mcp.auth.auth_manager import AuthManager
 from servicenow_mcp.utils.config import ServerConfig
+from servicenow_mcp.utils.query import QueryBuilder, QueryInputError
+from servicenow_mcp.utils.url import safe_table_url, SafeUrlError
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +58,7 @@ class CreateArticleParams(BaseModel):
     knowledge_base: str = Field(..., description="The knowledge base to create the article in")
     category: str = Field(..., description="Category for the article")
     keywords: Optional[str] = Field(None, description="Keywords for search")
-    article_type: Optional[str] = Field("html", description="The type of article. Options are 'text' or 'wiki'. text lets the text field support html formatting. wiki lets the text field support wiki markup.")
+    article_type: Optional[str] = Field("text", description="The type of article. Options are 'text' or 'wiki'. text lets the text field support html formatting. wiki lets the text field support wiki markup.")
 
 
 class UpdateArticleParams(BaseModel):
@@ -84,7 +86,9 @@ class ListArticlesParams(BaseModel):
     limit: int = Field(10, description="Maximum number of articles to return")
     offset: int = Field(0, description="Offset for pagination")
     knowledge_base: Optional[str] = Field(None, description="Filter by knowledge base")
+    kb_knowledge_base: Optional[str] = Field(None, description="Filter by knowledge base ID")
     category: Optional[str] = Field(None, description="Filter by category")
+    kb_category: Optional[str] = Field(None, description="Filter by category ID")
     query: Optional[str] = Field(None, description="Search query for articles")
     workflow_state: Optional[str] = Field(None, description="Filter by workflow state")
 
@@ -127,7 +131,10 @@ class ListCategoriesParams(BaseModel):
     """Parameters for listing categories in a knowledge base."""
     
     knowledge_base: Optional[str] = Field(None, description="Filter by knowledge base ID")
+    kb_knowledge_base: Optional[str] = Field(None, description="Filter by knowledge base ID")
     parent_category: Optional[str] = Field(None, description="Filter by parent category ID")
+    parent_id: Optional[str] = Field(None, description="Filter by parent category ID")
+    parent_table: Optional[str] = Field(None, description="Filter by parent table")
     limit: int = Field(10, description="Maximum number of categories to return")
     offset: int = Field(0, description="Offset for pagination")
     active: Optional[bool] = Field(None, description="Filter by active status")
@@ -150,7 +157,14 @@ def create_knowledge_base(
     Returns:
         Response with the created knowledge base details.
     """
-    api_url = f"{config.api_url}/table/kb_knowledge_base"
+    try:
+        api_url = safe_table_url(config.api_url, "kb_knowledge_base")
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Failed to build table URL: {e}")
+        return KnowledgeBaseResponse(
+            success=False,
+            message=str(e),
+        )
 
     # Build request data
     data = {
@@ -187,7 +201,7 @@ def create_knowledge_base(
             kb_name=result.get("title"),
         )
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to create knowledge base: {e}")
         return KnowledgeBaseResponse(
             success=False,
@@ -211,27 +225,31 @@ def list_knowledge_bases(
     Returns:
         Dictionary with list of knowledge bases and metadata.
     """
-    api_url = f"{config.api_url}/table/kb_knowledge_base"
-
-    # Build query parameters
-    query_params = {
-        "sysparm_limit": params.limit,
-        "sysparm_offset": params.offset,
-        "sysparm_display_value": "true",
-    }
-
-    # Build query string
-    query_parts = []
-    if params.active is not None:
-        query_parts.append(f"active={str(params.active).lower()}")
-    if params.query:
-        query_parts.append(f"titleLIKE{params.query}^ORdescriptionLIKE{params.query}")
-
-    if query_parts:
-        query_params["sysparm_query"] = "^".join(query_parts)
-
-    # Make request
     try:
+        api_url = safe_table_url(config.api_url, "kb_knowledge_base")
+
+        # Build query parameters
+        query_params = {
+            "sysparm_limit": params.limit,
+            "sysparm_offset": params.offset,
+            "sysparm_display_value": "true",
+        }
+
+        # Build query string
+        builder = QueryBuilder()
+        if params.active is not None:
+            builder.eq("active", params.active)
+        if params.query:
+            builder.or_group([
+                ("title", "LIKE", params.query),
+                ("description", "LIKE", params.query),
+            ])
+
+        query_str = builder.build()
+        if query_str:
+            query_params["sysparm_query"] = query_str
+
+        # Make request
         response = requests.get(
             api_url,
             params=query_params,
@@ -310,7 +328,7 @@ def list_knowledge_bases(
             "offset": params.offset,
         }
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to list knowledge bases: {e}")
         return {
             "success": False,
@@ -338,7 +356,14 @@ def create_category(
     Returns:
         Response with the created category details.
     """
-    api_url = f"{config.api_url}/table/kb_category"
+    try:
+        api_url = safe_table_url(config.api_url, "kb_category")
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Failed to build table URL: {e}")
+        return CategoryResponse(
+            success=False,
+            message=str(e),
+        )
 
     # Build request data
     data = {
@@ -386,7 +411,7 @@ def create_category(
             category_name=result.get("label"),
         )
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to create category: {e}")
         return CategoryResponse(
             success=False,
@@ -410,7 +435,14 @@ def create_article(
     Returns:
         Response with the created article details.
     """
-    api_url = f"{config.api_url}/table/kb_knowledge"
+    try:
+        api_url = safe_table_url(config.api_url, "kb_knowledge")
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Failed to build table URL: {e}")
+        return ArticleResponse(
+            success=False,
+            message=str(e),
+        )
 
     # Build request data
     data = {
@@ -446,7 +478,7 @@ def create_article(
             workflow_state=result.get("workflow_state"),
         )
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to create article: {e}")
         return ArticleResponse(
             success=False,
@@ -470,7 +502,14 @@ def update_article(
     Returns:
         Response with the updated article details.
     """
-    api_url = f"{config.api_url}/table/kb_knowledge/{params.article_id}"
+    try:
+        api_url = safe_table_url(config.api_url, "kb_knowledge", params.article_id)
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Failed to build table URL: {e}")
+        return ArticleResponse(
+            success=False,
+            message=str(e),
+        )
 
     # Build request data
     data = {}
@@ -506,7 +545,7 @@ def update_article(
             workflow_state=result.get("workflow_state"),
         )
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to update article: {e}")
         return ArticleResponse(
             success=False,
@@ -530,7 +569,14 @@ def publish_article(
     Returns:
         Response with the published article details.
     """
-    api_url = f"{config.api_url}/table/kb_knowledge/{params.article_id}"
+    try:
+        api_url = safe_table_url(config.api_url, "kb_knowledge", params.article_id)
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Failed to build table URL: {e}")
+        return ArticleResponse(
+            success=False,
+            message=str(e),
+        )
 
     # Build request data
     data = {
@@ -560,7 +606,7 @@ def publish_article(
             workflow_state=result.get("workflow_state"),
         )
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to publish article: {e}")
         return ArticleResponse(
             success=False,
@@ -584,36 +630,41 @@ def list_articles(
     Returns:
         Dictionary with list of articles and metadata.
     """
-    api_url = f"{config.api_url}/table/kb_knowledge"
-
-    # Build query parameters
-    query_params = {
-        "sysparm_limit": params.limit,
-        "sysparm_offset": params.offset,
-        "sysparm_display_value": "all",
-    }
-
-    # Build query string
-    query_parts = []
-    if params.knowledge_base:
-        query_parts.append(f"kb_knowledge_base.sys_id={params.knowledge_base}")
-    if params.category:
-        query_parts.append(f"kb_category.sys_id={params.category}")
-    if params.workflow_state:
-        query_parts.append(f"workflow_state={params.workflow_state}")
-    if params.query:
-        query_parts.append(f"short_descriptionLIKE{params.query}^ORtextLIKE{params.query}")
-
-    if query_parts:
-        query_string = "^".join(query_parts)
-        logger.debug(f"Constructed article query string: {query_string}")
-        query_params["sysparm_query"] = query_string
-    
-    # Log the query parameters for debugging
-    logger.debug(f"Listing articles with query params: {query_params}")
-
-    # Make request
     try:
+        api_url = safe_table_url(config.api_url, "kb_knowledge")
+
+        # Build query parameters
+        query_params = {
+            "sysparm_limit": params.limit,
+            "sysparm_offset": params.offset,
+            "sysparm_display_value": "all",
+        }
+
+        # Build query string
+        builder = QueryBuilder()
+        kb_val = params.knowledge_base or params.kb_knowledge_base
+        if kb_val:
+            builder.eq("kb_knowledge_base.sys_id", kb_val)
+        cat_val = params.category or params.kb_category
+        if cat_val:
+            builder.eq("kb_category.sys_id", cat_val)
+        if params.workflow_state:
+            builder.eq("workflow_state", params.workflow_state)
+        if params.query:
+            builder.or_group([
+                ("short_description", "LIKE", params.query),
+                ("text", "LIKE", params.query),
+            ])
+
+        query_str = builder.build()
+        if query_str:
+            logger.debug(f"Constructed article query string: {query_str}")
+            query_params["sysparm_query"] = query_str
+        
+        # Log the query parameters for debugging
+        logger.debug(f"Listing articles with query params: {query_params}")
+
+        # Make request
         response = requests.get(
             api_url,
             params=query_params,
@@ -691,7 +742,7 @@ def list_articles(
             "offset": params.offset,
         }
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to list articles: {e}")
         return {
             "success": False,
@@ -719,15 +770,15 @@ def get_article(
     Returns:
         Dictionary with article details.
     """
-    api_url = f"{config.api_url}/table/kb_knowledge/{params.article_id}"
-
-    # Build query parameters
-    query_params = {
-        "sysparm_display_value": "true",
-    }
-
-    # Make request
     try:
+        api_url = safe_table_url(config.api_url, "kb_knowledge", params.article_id)
+
+        # Build query parameters
+        query_params = {
+            "sysparm_display_value": "true",
+        }
+
+        # Make request
         response = requests.get(
             api_url,
             params=query_params,
@@ -804,7 +855,7 @@ def get_article(
             "article": article,
         }
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to get article: {e}")
         return {
             "success": False,
@@ -828,37 +879,42 @@ def list_categories(
     Returns:
         Dictionary with list of categories and metadata.
     """
-    api_url = f"{config.api_url}/table/kb_category"
-
-    # Build query parameters
-    query_params = {
-        "sysparm_limit": params.limit,
-        "sysparm_offset": params.offset,
-        "sysparm_display_value": "all",
-    }
-
-    # Build query string
-    query_parts = []
-    if params.knowledge_base:
-        # Try different query format to ensure we match by sys_id value
-        query_parts.append(f"kb_knowledge_base.sys_id={params.knowledge_base}")
-    if params.parent_category:
-        query_parts.append(f"parent.sys_id={params.parent_category}")
-    if params.active is not None:
-        query_parts.append(f"active={str(params.active).lower()}")
-    if params.query:
-        query_parts.append(f"labelLIKE{params.query}^ORdescriptionLIKE{params.query}")
-
-    if query_parts:
-        query_string = "^".join(query_parts)
-        logger.debug(f"Constructed query string: {query_string}")
-        query_params["sysparm_query"] = query_string
-    
-    # Log the query parameters for debugging
-    logger.debug(f"Listing categories with query params: {query_params}")
-
-    # Make request
     try:
+        api_url = safe_table_url(config.api_url, "kb_category")
+
+        # Build query parameters
+        query_params = {
+            "sysparm_limit": params.limit,
+            "sysparm_offset": params.offset,
+            "sysparm_display_value": "all",
+        }
+
+        # Build query string
+        builder = QueryBuilder()
+        kb_val = params.knowledge_base or params.kb_knowledge_base
+        if kb_val:
+            # Match by sys_id value
+            builder.eq("kb_knowledge_base.sys_id", kb_val)
+        parent_val = params.parent_category or params.parent_id
+        if parent_val:
+            builder.eq("parent.sys_id", parent_val)
+        if params.active is not None:
+            builder.eq("active", params.active)
+        if params.query:
+            builder.or_group([
+                ("label", "LIKE", params.query),
+                ("description", "LIKE", params.query),
+            ])
+
+        query_str = builder.build()
+        if query_str:
+            logger.debug(f"Constructed query string: {query_str}")
+            query_params["sysparm_query"] = query_str
+        
+        # Log the query parameters for debugging
+        logger.debug(f"Listing categories with query params: {query_params}")
+
+        # Make request
         response = requests.get(
             api_url,
             params=query_params,
@@ -962,7 +1018,7 @@ def list_categories(
             "offset": params.offset,
         }
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to list categories: {e}")
         return {
             "success": False,

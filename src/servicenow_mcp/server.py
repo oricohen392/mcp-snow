@@ -140,19 +140,27 @@ def serialize_tool_output(result: Any, tool_name: str) -> str:
 
 def _reject_query_separators(tool_name: str, arguments: Dict[str, Any]) -> None:
     """
-    Defense in depth for read tools: no string argument may contain '^'.
+    Defense in depth for read tools: no string argument may contain '^', null bytes, or line breaks.
 
     Several older list tools still interpolate arguments into sysparm_query;
     '^' would let a caller append encoded-query conditions (e.g. '^NQ').
+    Null bytes and line breaks prevent query truncation and HTTP parameter injection.
     """
+    forbidden = {
+        "^": "separator '^'",
+        "\x00": "null byte",
+        "\r": "carriage return",
+        "\n": "newline",
+    }
     for key, value in arguments.items():
         values = value if isinstance(value, list) else [value]
         for item in values:
-            if isinstance(item, str) and "^" in item:
-                raise ValueError(
-                    f"Invalid argument '{key}' for tool '{tool_name}': the character '^' is not "
-                    "allowed (it is the ServiceNow encoded-query separator)."
-                )
+            if isinstance(item, str):
+                for ch, desc in forbidden.items():
+                    if ch in item:
+                        raise ValueError(
+                            f"Invalid argument '{key}' for tool '{tool_name}': contains forbidden character ({desc})."
+                        )
 
 
 class ServiceNowMCP:

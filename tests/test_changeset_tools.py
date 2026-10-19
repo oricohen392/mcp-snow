@@ -91,7 +91,7 @@ class TestChangesetTools(unittest.TestCase):
         self.assertIn("sysparm_query", kwargs["params"])
         self.assertIn("state=in_progress", kwargs["params"]["sysparm_query"])
         self.assertIn("application=Test App", kwargs["params"]["sysparm_query"])
-        self.assertIn("developer=test.user", kwargs["params"]["sysparm_query"])
+        self.assertIn("sys_created_by=test.user", kwargs["params"]["sysparm_query"])
 
     @patch("servicenow_mcp.tools.changeset_tools.requests.get")
     def test_get_changeset_details(self, mock_get):
