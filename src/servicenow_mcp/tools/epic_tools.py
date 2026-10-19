@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field
 
 from servicenow_mcp.auth.auth_manager import AuthManager
 from servicenow_mcp.utils.config import ServerConfig
+from servicenow_mcp.utils.query import QueryBuilder, QueryInputError
+from servicenow_mcp.utils.url import safe_table_url, SafeUrlError
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,7 @@ class ListEpicsParams(BaseModel):
 
     limit: Optional[int] = Field(10, description="Maximum number of records to return")
     offset: Optional[int] = Field(0, description="Offset to start from")
+    state: Optional[str] = Field(None, description="Filter by state")
     priority: Optional[str] = Field(None, description="Filter by priority")
     assignment_group: Optional[str] = Field(None, description="Filter by assignment group")
     timeframe: Optional[str] = Field(None, description="Filter by timeframe (upcoming, in-progress, completed)")
@@ -219,10 +222,10 @@ def create_epic(
     # Add Content-Type header
     headers["Content-Type"] = "application/json"
     
-    # Make the API request
-    url = f"{instance_url}/api/now/table/rm_epic"
-    
     try:
+        # Make the API request
+        url = safe_table_url(instance_url, "rm_epic")
+        
         response = requests.post(url, json=data, headers=headers)
         response.raise_for_status()
         
@@ -232,6 +235,12 @@ def create_epic(
             "success": True,
             "message": "Epic created successfully",
             "epic": result["result"],
+        }
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error creating epic: {e}")
+        return {
+            "success": False,
+            "message": f"Validation error creating epic: {str(e)}",
         }
     except requests.exceptions.RequestException as e:
         logger.error(f"Error creating epic: {e}")
@@ -304,10 +313,10 @@ def update_epic(
     # Add Content-Type header
     headers["Content-Type"] = "application/json"
     
-    # Make the API request
-    url = f"{instance_url}/api/now/table/rm_epic/{validated_params.epic_id}"
-    
     try:
+        # Make the API request
+        url = safe_table_url(instance_url, "rm_epic", validated_params.epic_id)
+        
         response = requests.put(url, json=data, headers=headers)
         response.raise_for_status()
         
@@ -317,6 +326,12 @@ def update_epic(
             "success": True,
             "message": "Epic updated successfully",
             "epic": result["result"],
+        }
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error updating epic: {e}")
+        return {
+            "success": False,
+            "message": f"Validation error updating epic: {str(e)}",
         }
     except requests.exceptions.RequestException as e:
         logger.error(f"Error updating epic: {e}")
@@ -352,31 +367,6 @@ def list_epics(
     
     validated_params = result["params"]
     
-    # Build the query
-    query_parts = []
-    
-    if validated_params.priority:
-        query_parts.append(f"priority={validated_params.priority}")
-    if validated_params.assignment_group:
-        query_parts.append(f"assignment_group={validated_params.assignment_group}")
-    
-    # Handle timeframe filtering
-    if validated_params.timeframe:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if validated_params.timeframe == "upcoming":
-            query_parts.append(f"start_date>{now}")
-        elif validated_params.timeframe == "in-progress":
-            query_parts.append(f"start_date<{now}^end_date>{now}")
-        elif validated_params.timeframe == "completed":
-            query_parts.append(f"end_date<{now}")
-    
-    # Add any additional query string
-    if validated_params.query:
-        query_parts.append(validated_params.query)
-    
-    # Combine query parts
-    query = "^".join(query_parts) if query_parts else ""
-    
     # Get the instance URL
     instance_url = _get_instance_url(auth_manager, server_config)
     if not instance_url:
@@ -393,18 +383,42 @@ def list_epics(
             "message": "Cannot find get_headers method in either auth_manager or server_config",
         }
     
-    # Make the API request
-    url = f"{instance_url}/api/now/table/rm_epic"
-    
-    params = {
-        "sysparm_limit": validated_params.limit,
-        "sysparm_offset": validated_params.offset,
-        "sysparm_query": query,
-        "sysparm_display_value": "true",
-    }
-    
     try:
-        response = requests.get(url, headers=headers, params=params)
+        # Make the API request
+        url = safe_table_url(instance_url, "rm_epic")
+        
+        builder = QueryBuilder()
+        if validated_params.state:
+            builder.eq("state", validated_params.state)
+        if validated_params.priority:
+            builder.eq("priority", validated_params.priority)
+        if validated_params.assignment_group:
+            builder.eq("assignment_group", validated_params.assignment_group)
+        if validated_params.query:
+            builder.or_group([
+                ("short_description", "LIKE", validated_params.query),
+                ("description", "LIKE", validated_params.query),
+            ])
+        if validated_params.timeframe:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if validated_params.timeframe == "upcoming":
+                builder.where("start_date", ">", now)
+            elif validated_params.timeframe == "in-progress":
+                builder.where("start_date", "<", now).where("end_date", ">", now)
+            elif validated_params.timeframe == "completed":
+                builder.where("end_date", "<", now)
+        
+        built_query = builder.build()
+        
+        req_params = {
+            "sysparm_limit": validated_params.limit,
+            "sysparm_offset": validated_params.offset,
+            "sysparm_display_value": "true",
+        }
+        if built_query:
+            req_params["sysparm_query"] = built_query
+        
+        response = requests.get(url, headers=headers, params=req_params)
         response.raise_for_status()
         
         result = response.json()
@@ -418,6 +432,12 @@ def list_epics(
             "epics": epics,
             "count": count,
             "total": count,  # Use count as total if total is not provided
+        }
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error listing epics: {e}")
+        return {
+            "success": False,
+            "message": f"Validation error listing epics: {str(e)}",
         }
     except requests.exceptions.RequestException as e:
         logger.error(f"Error listing epics: {e}")

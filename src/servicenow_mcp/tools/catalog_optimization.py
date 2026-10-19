@@ -16,6 +16,8 @@ from pydantic import BaseModel, Field
 
 from servicenow_mcp.auth.auth_manager import AuthManager
 from servicenow_mcp.utils.config import ServerConfig
+from servicenow_mcp.utils.query import QueryBuilder
+from servicenow_mcp.utils.url import safe_table_url
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +178,7 @@ def update_catalog_item(
             body["order"] = str(params.order)
         
         # Make the API request
-        url = f"{config.instance_url}/api/now/table/sc_cat_item/{params.item_id}"
+        url = safe_table_url(config.instance_url, "sc_cat_item", params.item_id)
         headers = auth_manager.get_headers()
         headers["Content-Type"] = "application/json"
         
@@ -214,12 +216,13 @@ def _get_inactive_items(
     """
     try:
         # Build the query
-        query = "active=false"
+        builder = QueryBuilder().eq("active", False)
         if category_id:
-            query += f"^category={category_id}"
+            builder.eq("category", category_id)
+        query = builder.build()
         
         # Make the API request
-        url = f"{config.instance_url}/api/now/table/sc_cat_item"
+        url = safe_table_url(config.instance_url, "sc_cat_item")
         headers = auth_manager.get_headers()
         params = {
             "sysparm_query": query,
@@ -253,12 +256,13 @@ def _get_low_usage_items(
     """
     try:
         # Build the query
-        query = "active=true"
+        builder = QueryBuilder().eq("active", True)
         if category_id:
-            query += f"^category={category_id}"
+            builder.eq("category", category_id)
+        query = builder.build()
         
         # Make the API request
-        url = f"{config.instance_url}/api/now/table/sc_cat_item"
+        url = safe_table_url(config.instance_url, "sc_cat_item")
         headers = auth_manager.get_headers()
         params = {
             "sysparm_query": query,
@@ -303,12 +307,13 @@ def _get_high_abandonment_items(
     """
     try:
         # Build the query
-        query = "active=true"
+        builder = QueryBuilder().eq("active", True)
         if category_id:
-            query += f"^category={category_id}"
+            builder.eq("category", category_id)
+        query = builder.build()
         
         # Make the API request
-        url = f"{config.instance_url}/api/now/table/sc_cat_item"
+        url = safe_table_url(config.instance_url, "sc_cat_item")
         headers = auth_manager.get_headers()
         params = {
             "sysparm_query": query,
@@ -359,12 +364,13 @@ def _get_slow_fulfillment_items(
     """
     try:
         # Build the query
-        query = "active=true"
+        builder = QueryBuilder().eq("active", True)
         if category_id:
-            query += f"^category={category_id}"
+            builder.eq("category", category_id)
+        query = builder.build()
         
         # Make the API request
-        url = f"{config.instance_url}/api/now/table/sc_cat_item"
+        url = safe_table_url(config.instance_url, "sc_cat_item")
         headers = auth_manager.get_headers()
         params = {
             "sysparm_query": query,
@@ -415,12 +421,13 @@ def _get_poor_description_items(
     """
     try:
         # Build the query
-        query = "active=true"
+        builder = QueryBuilder().eq("active", True)
         if category_id:
-            query += f"^category={category_id}"
+            builder.eq("category", category_id)
+        query = builder.build()
         
         # Make the API request
-        url = f"{config.instance_url}/api/now/table/sc_cat_item"
+        url = safe_table_url(config.instance_url, "sc_cat_item")
         headers = auth_manager.get_headers()
         params = {
             "sysparm_query": query,

@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 
 from servicenow_mcp.auth.auth_manager import AuthManager
 from servicenow_mcp.utils.config import ServerConfig
+from servicenow_mcp.utils.query import QueryBuilder, QueryInputError
+from servicenow_mcp.utils.url import safe_table_url, SafeUrlError
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,7 @@ class ListCatalogCategoriesParams(BaseModel):
     
     limit: int = Field(10, description="Maximum number of categories to return")
     offset: int = Field(0, description="Offset for pagination")
+    parent_category: Optional[str] = Field(None, description="Filter by parent category")
     query: Optional[str] = Field(None, description="Search query for categories")
     active: bool = Field(True, description="Whether to only return active categories")
 
@@ -97,34 +100,38 @@ def list_catalog_items(
     """
     logger.info("Listing service catalog items")
     
-    # Build the API URL
-    url = f"{config.instance_url}/api/now/table/sc_cat_item"
-    
-    # Prepare query parameters
-    query_params = {
-        "sysparm_limit": params.limit,
-        "sysparm_offset": params.offset,
-        "sysparm_display_value": "true",
-        "sysparm_exclude_reference_link": "true",
-    }
-    
-    # Add filters
-    filters = []
-    if params.active:
-        filters.append("active=true")
-    if params.category:
-        filters.append(f"category={params.category}")
-    if params.query:
-        filters.append(f"short_descriptionLIKE{params.query}^ORnameLIKE{params.query}")
-    
-    if filters:
-        query_params["sysparm_query"] = "^".join(filters)
-    
-    # Make the API request
-    headers = auth_manager.get_headers()
-    headers["Accept"] = "application/json"
-    
     try:
+        # Build the API URL
+        url = safe_table_url(config.instance_url, "sc_cat_item")
+        
+        # Prepare query parameters
+        query_params = {
+            "sysparm_limit": params.limit,
+            "sysparm_offset": params.offset,
+            "sysparm_display_value": "true",
+            "sysparm_exclude_reference_link": "true",
+        }
+        
+        # Build query using QueryBuilder
+        builder = QueryBuilder()
+        if params.active:
+            builder.eq("active", True)
+        if params.category:
+            builder.eq("category", params.category)
+        if params.query:
+            builder.or_group([
+                ("short_description", "LIKE", params.query),
+                ("name", "LIKE", params.query),
+            ])
+        
+        built_query = builder.build()
+        if built_query:
+            query_params["sysparm_query"] = built_query
+        
+        # Make the API request
+        headers = auth_manager.get_headers()
+        headers["Accept"] = "application/json"
+        
         response = requests.get(url, headers=headers, params=query_params)
         response.raise_for_status()
         
@@ -155,6 +162,16 @@ def list_catalog_items(
             "offset": params.offset,
         }
     
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error listing catalog items: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Validation error listing catalog items: {str(e)}",
+            "items": [],
+            "total": 0,
+            "limit": params.limit,
+            "offset": params.offset,
+        }
     except requests.exceptions.RequestException as e:
         logger.error(f"Error listing catalog items: {str(e)}")
         return {
@@ -185,20 +202,20 @@ def get_catalog_item(
     """
     logger.info(f"Getting service catalog item: {params.item_id}")
     
-    # Build the API URL
-    url = f"{config.instance_url}/api/now/table/sc_cat_item/{params.item_id}"
-    
-    # Prepare query parameters
-    query_params = {
-        "sysparm_display_value": "true",
-        "sysparm_exclude_reference_link": "true",
-    }
-    
-    # Make the API request
-    headers = auth_manager.get_headers()
-    headers["Accept"] = "application/json"
-    
     try:
+        # Build the API URL
+        url = safe_table_url(config.instance_url, "sc_cat_item", params.item_id)
+        
+        # Prepare query parameters
+        query_params = {
+            "sysparm_display_value": "true",
+            "sysparm_exclude_reference_link": "true",
+        }
+        
+        # Make the API request
+        headers = auth_manager.get_headers()
+        headers["Accept"] = "application/json"
+        
         response = requests.get(url, headers=headers, params=query_params)
         response.raise_for_status()
         
@@ -235,6 +252,13 @@ def get_catalog_item(
             data=formatted_item,
         )
     
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error getting catalog item: {str(e)}")
+        return CatalogResponse(
+            success=False,
+            message=f"Validation error getting catalog item: {str(e)}",
+            data=None,
+        )
     except requests.exceptions.RequestException as e:
         logger.error(f"Error getting catalog item: {str(e)}")
         return CatalogResponse(
@@ -262,21 +286,21 @@ def get_catalog_item_variables(
     """
     logger.info(f"Getting variables for catalog item: {item_id}")
     
-    # Build the API URL
-    url = f"{config.instance_url}/api/now/table/item_option_new"
-    
-    # Prepare query parameters
-    query_params = {
-        "sysparm_query": f"cat_item={item_id}^ORDERBYorder",
-        "sysparm_display_value": "true",
-        "sysparm_exclude_reference_link": "true",
-    }
-    
-    # Make the API request
-    headers = auth_manager.get_headers()
-    headers["Accept"] = "application/json"
-    
     try:
+        # Build the API URL
+        url = safe_table_url(config.instance_url, "item_option_new")
+        
+        # Prepare query parameters
+        query_params = {
+            "sysparm_query": QueryBuilder().eq("cat_item", item_id).order_by("order").build(),
+            "sysparm_display_value": "true",
+            "sysparm_exclude_reference_link": "true",
+        }
+        
+        # Make the API request
+        headers = auth_manager.get_headers()
+        headers["Accept"] = "application/json"
+        
         response = requests.get(url, headers=headers, params=query_params)
         response.raise_for_status()
         
@@ -300,6 +324,9 @@ def get_catalog_item_variables(
         
         return formatted_variables
     
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error getting catalog item variables: {str(e)}")
+        return []
     except requests.exceptions.RequestException as e:
         logger.error(f"Error getting catalog item variables: {str(e)}")
         return []
@@ -323,32 +350,38 @@ def list_catalog_categories(
     """
     logger.info("Listing service catalog categories")
     
-    # Build the API URL
-    url = f"{config.instance_url}/api/now/table/sc_category"
-    
-    # Prepare query parameters
-    query_params = {
-        "sysparm_limit": params.limit,
-        "sysparm_offset": params.offset,
-        "sysparm_display_value": "true",
-        "sysparm_exclude_reference_link": "true",
-    }
-    
-    # Add filters
-    filters = []
-    if params.active:
-        filters.append("active=true")
-    if params.query:
-        filters.append(f"titleLIKE{params.query}^ORdescriptionLIKE{params.query}")
-    
-    if filters:
-        query_params["sysparm_query"] = "^".join(filters)
-    
-    # Make the API request
-    headers = auth_manager.get_headers()
-    headers["Accept"] = "application/json"
-    
     try:
+        # Build the API URL
+        url = safe_table_url(config.instance_url, "sc_category")
+        
+        # Prepare query parameters
+        query_params = {
+            "sysparm_limit": params.limit,
+            "sysparm_offset": params.offset,
+            "sysparm_display_value": "true",
+            "sysparm_exclude_reference_link": "true",
+        }
+        
+        # Build query using QueryBuilder
+        builder = QueryBuilder()
+        if params.active:
+            builder.eq("active", True)
+        if getattr(params, "parent_category", None):
+            builder.eq("parent", params.parent_category)
+        if params.query:
+            builder.or_group([
+                ("title", "LIKE", params.query),
+                ("description", "LIKE", params.query),
+            ])
+        
+        built_query = builder.build()
+        if built_query:
+            query_params["sysparm_query"] = built_query
+        
+        # Make the API request
+        headers = auth_manager.get_headers()
+        headers["Accept"] = "application/json"
+        
         response = requests.get(url, headers=headers, params=query_params)
         response.raise_for_status()
         
@@ -378,6 +411,16 @@ def list_catalog_categories(
             "offset": params.offset,
         }
     
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error listing catalog categories: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Validation error listing catalog categories: {str(e)}",
+            "categories": [],
+            "total": 0,
+            "limit": params.limit,
+            "offset": params.offset,
+        }
     except requests.exceptions.RequestException as e:
         logger.error(f"Error listing catalog categories: {str(e)}")
         return {
@@ -408,31 +451,31 @@ def create_catalog_category(
     """
     logger.info("Creating new service catalog category")
     
-    # Build the API URL
-    url = f"{config.instance_url}/api/now/table/sc_category"
-    
-    # Prepare request body
-    body = {
-        "title": params.title,
-    }
-    
-    if params.description is not None:
-        body["description"] = params.description
-    if params.parent is not None:
-        body["parent"] = params.parent
-    if params.icon is not None:
-        body["icon"] = params.icon
-    if params.active is not None:
-        body["active"] = str(params.active).lower()
-    if params.order is not None:
-        body["order"] = str(params.order)
-    
-    # Make the API request
-    headers = auth_manager.get_headers()
-    headers["Accept"] = "application/json"
-    headers["Content-Type"] = "application/json"
-    
     try:
+        # Build the API URL
+        url = safe_table_url(config.instance_url, "sc_category")
+        
+        # Prepare request body
+        body = {
+            "title": params.title,
+        }
+        
+        if params.description is not None:
+            body["description"] = params.description
+        if params.parent is not None:
+            body["parent"] = params.parent
+        if params.icon is not None:
+            body["icon"] = params.icon
+        if params.active is not None:
+            body["active"] = str(params.active).lower()
+        if params.order is not None:
+            body["order"] = str(params.order)
+        
+        # Make the API request
+        headers = auth_manager.get_headers()
+        headers["Accept"] = "application/json"
+        headers["Content-Type"] = "application/json"
+        
         response = requests.post(url, headers=headers, json=body)
         response.raise_for_status()
         
@@ -457,6 +500,13 @@ def create_catalog_category(
             data=formatted_category,
         )
     
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error creating catalog category: {str(e)}")
+        return CatalogResponse(
+            success=False,
+            message=f"Validation error creating catalog category: {str(e)}",
+            data=None,
+        )
     except requests.exceptions.RequestException as e:
         logger.error(f"Error creating catalog category: {str(e)}")
         return CatalogResponse(
@@ -484,30 +534,30 @@ def update_catalog_category(
     """
     logger.info(f"Updating service catalog category: {params.category_id}")
     
-    # Build the API URL
-    url = f"{config.instance_url}/api/now/table/sc_category/{params.category_id}"
-    
-    # Prepare request body with only the provided parameters
-    body = {}
-    if params.title is not None:
-        body["title"] = params.title
-    if params.description is not None:
-        body["description"] = params.description
-    if params.parent is not None:
-        body["parent"] = params.parent
-    if params.icon is not None:
-        body["icon"] = params.icon
-    if params.active is not None:
-        body["active"] = str(params.active).lower()
-    if params.order is not None:
-        body["order"] = str(params.order)
-    
-    # Make the API request
-    headers = auth_manager.get_headers()
-    headers["Accept"] = "application/json"
-    headers["Content-Type"] = "application/json"
-    
     try:
+        # Build the API URL
+        url = safe_table_url(config.instance_url, "sc_category", params.category_id)
+        
+        # Prepare request body with only the provided parameters
+        body = {}
+        if params.title is not None:
+            body["title"] = params.title
+        if params.description is not None:
+            body["description"] = params.description
+        if params.parent is not None:
+            body["parent"] = params.parent
+        if params.icon is not None:
+            body["icon"] = params.icon
+        if params.active is not None:
+            body["active"] = str(params.active).lower()
+        if params.order is not None:
+            body["order"] = str(params.order)
+        
+        # Make the API request
+        headers = auth_manager.get_headers()
+        headers["Accept"] = "application/json"
+        headers["Content-Type"] = "application/json"
+        
         response = requests.patch(url, headers=headers, json=body)
         response.raise_for_status()
         
@@ -532,6 +582,13 @@ def update_catalog_category(
             data=formatted_category,
         )
     
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error updating catalog category: {str(e)}")
+        return CatalogResponse(
+            success=False,
+            message=f"Validation error updating catalog category: {str(e)}",
+            data=None,
+        )
     except requests.exceptions.RequestException as e:
         logger.error(f"Error updating catalog category: {str(e)}")
         return CatalogResponse(
@@ -559,9 +616,6 @@ def move_catalog_items(
     """
     logger.info(f"Moving {len(params.item_ids)} catalog items to category: {params.target_category_id}")
     
-    # Build the API URL
-    url = f"{config.instance_url}/api/now/table/sc_cat_item"
-    
     # Make the API request for each item
     headers = auth_manager.get_headers()
     headers["Accept"] = "application/json"
@@ -571,16 +625,21 @@ def move_catalog_items(
     failed_items = []
     
     try:
+        # Validate target category ID first
+        safe_table_url(config.instance_url, "sc_category", params.target_category_id)
+        
         for item_id in params.item_ids:
-            item_url = f"{url}/{item_id}"
-            body = {
-                "category": params.target_category_id
-            }
-            
             try:
+                item_url = safe_table_url(config.instance_url, "sc_cat_item", item_id)
+                body = {
+                    "category": params.target_category_id
+                }
                 response = requests.patch(item_url, headers=headers, json=body)
                 response.raise_for_status()
                 success_count += 1
+            except (SafeUrlError, QueryInputError) as e:
+                logger.error(f"Validation error moving catalog item {item_id}: {str(e)}")
+                failed_items.append({"item_id": item_id, "error": str(e)})
             except requests.exceptions.RequestException as e:
                 logger.error(f"Error moving catalog item {item_id}: {str(e)}")
                 failed_items.append({"item_id": item_id, "error": str(e)})
@@ -608,6 +667,13 @@ def move_catalog_items(
                 data={"failed_items": failed_items},
             )
     
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error moving catalog items: {str(e)}")
+        return CatalogResponse(
+            success=False,
+            message=f"Validation error moving catalog items: {str(e)}",
+            data=None,
+        )
     except Exception as e:
         logger.error(f"Error moving catalog items: {str(e)}")
         return CatalogResponse(

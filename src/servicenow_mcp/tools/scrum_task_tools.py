@@ -1,7 +1,7 @@
 """
 Scrum Task management tools for the ServiceNow MCP server.
 
-This module provides tools for managing stories in ServiceNow.
+This module provides tools for managing scrum tasks in ServiceNow.
 """
 
 import logging
@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field
 
 from servicenow_mcp.auth.auth_manager import AuthManager
 from servicenow_mcp.utils.config import ServerConfig
+from servicenow_mcp.utils.query import QueryBuilder, QueryInputError
+from servicenow_mcp.utils.url import safe_table_url, SafeUrlError
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +58,15 @@ class ListScrumTasksParams(BaseModel):
 
     limit: Optional[int] = Field(10, description="Maximum number of records to return")
     offset: Optional[int] = Field(0, description="Offset to start from")
+    story_id: Optional[str] = Field(None, description="Filter by story ID or sys_id")
     state: Optional[str] = Field(None, description="Filter by state")
+    assigned_to: Optional[str] = Field(None, description="Filter by assigned user")
     assignment_group: Optional[str] = Field(None, description="Filter by assignment group")
     timeframe: Optional[str] = Field(None, description="Filter by timeframe (upcoming, in-progress, completed)")
-    query: Optional[str] = Field(None, description="Additional query string")
+    query: Optional[str] = Field(
+        None,
+        description="Case-insensitive search term that matches against short_description or description fields. Uses ServiceNow's LIKE operator for partial matching.",
+    )
 
 
 def _unwrap_and_validate_params(params: Any, model_class: Type[T], required_fields: List[str] = None) -> Dict[str, Any]:
@@ -240,9 +247,8 @@ def create_scrum_task(
     headers["Content-Type"] = "application/json"
     
     # Make the API request
-    url = f"{instance_url}/api/now/table/rm_scrum_task"
-    
     try:
+        url = safe_table_url(instance_url, "rm_scrum_task")
         response = requests.post(url, json=data, headers=headers)
         response.raise_for_status()
         
@@ -253,7 +259,7 @@ def create_scrum_task(
             "message": "Scrum Task created successfully",
             "scrum_task": result["result"],
         }
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Error creating scrum task: {e}")
         return {
             "success": False,
@@ -335,9 +341,8 @@ def update_scrum_task(
     headers["Content-Type"] = "application/json"
     
     # Make the API request
-    url = f"{instance_url}/api/now/table/rm_scrum_task/{validated_params.scrum_task_id}"
-    
     try:
+        url = safe_table_url(instance_url, "rm_scrum_task", validated_params.scrum_task_id)
         response = requests.put(url, json=data, headers=headers)
         response.raise_for_status()
         
@@ -348,7 +353,7 @@ def update_scrum_task(
             "message": "Scrum Task updated successfully",
             "scrum_task": result["result"],
         }
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Error updating scrum task: {e}")
         return {
             "success": False,
@@ -382,59 +387,66 @@ def list_scrum_tasks(
     
     validated_params = result["params"]
     
-    # Build the query
-    query_parts = []
-    
-    if validated_params.state:
-        query_parts.append(f"state={validated_params.state}")
-    if validated_params.assignment_group:
-        query_parts.append(f"assignment_group={validated_params.assignment_group}")
-    
-    # Handle timeframe filtering
-    if validated_params.timeframe:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if validated_params.timeframe == "upcoming":
-            query_parts.append(f"start_date>{now}")
-        elif validated_params.timeframe == "in-progress":
-            query_parts.append(f"start_date<{now}^end_date>{now}")
-        elif validated_params.timeframe == "completed":
-            query_parts.append(f"end_date<{now}")
-    
-    # Add any additional query string
-    if validated_params.query:
-        query_parts.append(validated_params.query)
-    
-    # Combine query parts
-    query = "^".join(query_parts) if query_parts else ""
-    
-    # Get the instance URL
-    instance_url = _get_instance_url(auth_manager, server_config)
-    if not instance_url:
-        return {
-            "success": False,
-            "message": "Cannot find instance_url in either server_config or auth_manager",
-        }
-    
-    # Get the headers
-    headers = _get_headers(auth_manager, server_config)
-    if not headers:
-        return {
-            "success": False,
-            "message": "Cannot find get_headers method in either auth_manager or server_config",
-        }
-    
-    # Make the API request
-    url = f"{instance_url}/api/now/table/rm_scrum_task"
-    
-    params = {
-        "sysparm_limit": validated_params.limit,
-        "sysparm_offset": validated_params.offset,
-        "sysparm_query": query,
-        "sysparm_display_value": "true",
-    }
-    
     try:
-        response = requests.get(url, headers=headers, params=params)
+        # Build the query
+        builder = QueryBuilder()
+        if validated_params.story_id:
+            builder.eq("story", validated_params.story_id)
+        if validated_params.state:
+            builder.eq("state", validated_params.state)
+        if validated_params.assigned_to:
+            builder.eq("assigned_to", validated_params.assigned_to)
+        if validated_params.assignment_group:
+            builder.eq("assignment_group", validated_params.assignment_group)
+        
+        # Handle timeframe filtering
+        if validated_params.timeframe:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if validated_params.timeframe == "upcoming":
+                builder.gt("start_date", now)
+            elif validated_params.timeframe == "in-progress":
+                builder.lt("start_date", now)
+                builder.gt("end_date", now)
+            elif validated_params.timeframe == "completed":
+                builder.lt("end_date", now)
+        
+        # Add any additional query string
+        if validated_params.query:
+            builder.or_group([
+                ("short_description", "LIKE", validated_params.query),
+                ("description", "LIKE", validated_params.query),
+            ])
+        
+        query = builder.build()
+        
+        # Get the instance URL
+        instance_url = _get_instance_url(auth_manager, server_config)
+        if not instance_url:
+            return {
+                "success": False,
+                "message": "Cannot find instance_url in either server_config or auth_manager",
+            }
+        
+        # Get the headers
+        headers = _get_headers(auth_manager, server_config)
+        if not headers:
+            return {
+                "success": False,
+                "message": "Cannot find get_headers method in either auth_manager or server_config",
+            }
+        
+        # Make the API request
+        url = safe_table_url(instance_url, "rm_scrum_task")
+        
+        request_params = {
+            "sysparm_limit": validated_params.limit,
+            "sysparm_offset": validated_params.offset,
+            "sysparm_display_value": "true",
+        }
+        if query:
+            request_params["sysparm_query"] = query
+        
+        response = requests.get(url, headers=headers, params=request_params)
         response.raise_for_status()
         
         result = response.json()
@@ -449,9 +461,9 @@ def list_scrum_tasks(
             "count": count,
             "total": count,  # Use count as total if total is not provided
         }
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error listing stories: {e}")
+    except (requests.exceptions.RequestException, SafeUrlError, QueryInputError) as e:
+        logger.error(f"Error listing scrum tasks: {e}")
         return {
             "success": False,
-            "message": f"Error listing stories: {str(e)}",
+            "message": f"Error listing scrum tasks: {str(e)}",
         }

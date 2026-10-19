@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field
 
 from servicenow_mcp.auth.auth_manager import AuthManager
 from servicenow_mcp.utils.config import ServerConfig
+from servicenow_mcp.utils.query import QueryBuilder, QueryInputError
+from servicenow_mcp.utils.url import safe_table_url, SafeUrlError
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +55,11 @@ class ListStoriesParams(BaseModel):
 
     limit: Optional[int] = Field(10, description="Maximum number of records to return")
     offset: Optional[int] = Field(0, description="Offset to start from")
+    sprint_id: Optional[str] = Field(None, description="Filter by sprint ID or sys_id")
+    epic_id: Optional[str] = Field(None, description="Filter by epic ID or sys_id")
+    epic: Optional[str] = Field(None, description="Filter by epic ID or sys_id (alias)")
     state: Optional[str] = Field(None, description="Filter by state")
+    assigned_to: Optional[str] = Field(None, description="Filter by assigned user")
     assignment_group: Optional[str] = Field(None, description="Filter by assignment group")
     timeframe: Optional[str] = Field(None, description="Filter by timeframe (upcoming, in-progress, completed)")
     query: Optional[str] = Field(None, description="Additional query string")
@@ -64,8 +70,10 @@ class ListStoryDependenciesParams(BaseModel):
     limit: Optional[int] = Field(10, description="Maximum number of records to return")
     offset: Optional[int] = Field(0, description="Offset to start from")
     query: Optional[str] = Field(None, description="Additional query string")
+    story_id: Optional[str] = Field(None, description="Filter by story ID (dependent or prerequisite)")
     dependent_story: Optional[str] = Field(None, description="Sys_id of the dependent story is required")
     prerequisite_story: Optional[str] = Field(None, description="Sys_id that this story depends on is required")
+    prerequisite_story_id: Optional[str] = Field(None, description="Sys_id that this story depends on (alias)")
 
 class CreateStoryDependencyParams(BaseModel):
     """Parameters for creating a story dependency."""
@@ -252,9 +260,8 @@ def create_story(
     headers["Content-Type"] = "application/json"
     
     # Make the API request
-    url = f"{instance_url}/api/now/table/rm_story"
-    
     try:
+        url = safe_table_url(instance_url, "rm_story")
         response = requests.post(url, json=data, headers=headers)
         response.raise_for_status()
         
@@ -265,7 +272,7 @@ def create_story(
             "message": "Story created successfully",
             "story": result["result"],
         }
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Error creating story: {e}")
         return {
             "success": False,
@@ -345,9 +352,8 @@ def update_story(
     headers["Content-Type"] = "application/json"
     
     # Make the API request
-    url = f"{instance_url}/api/now/table/rm_story/{validated_params.story_id}"
-    
     try:
+        url = safe_table_url(instance_url, "rm_story", validated_params.story_id)
         response = requests.put(url, json=data, headers=headers)
         response.raise_for_status()
         
@@ -358,7 +364,7 @@ def update_story(
             "message": "Story updated successfully",
             "story": result["result"],
         }
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Error updating story: {e}")
         return {
             "success": False,
@@ -392,59 +398,69 @@ def list_stories(
     
     validated_params = result["params"]
     
-    # Build the query
-    query_parts = []
-    
-    if validated_params.state:
-        query_parts.append(f"state={validated_params.state}")
-    if validated_params.assignment_group:
-        query_parts.append(f"assignment_group={validated_params.assignment_group}")
-    
-    # Handle timeframe filtering
-    if validated_params.timeframe:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if validated_params.timeframe == "upcoming":
-            query_parts.append(f"start_date>{now}")
-        elif validated_params.timeframe == "in-progress":
-            query_parts.append(f"start_date<{now}^end_date>{now}")
-        elif validated_params.timeframe == "completed":
-            query_parts.append(f"end_date<{now}")
-    
-    # Add any additional query string
-    if validated_params.query:
-        query_parts.append(validated_params.query)
-    
-    # Combine query parts
-    query = "^".join(query_parts) if query_parts else ""
-    
-    # Get the instance URL
-    instance_url = _get_instance_url(auth_manager, server_config)
-    if not instance_url:
-        return {
-            "success": False,
-            "message": "Cannot find instance_url in either server_config or auth_manager",
-        }
-    
-    # Get the headers
-    headers = _get_headers(auth_manager, server_config)
-    if not headers:
-        return {
-            "success": False,
-            "message": "Cannot find get_headers method in either auth_manager or server_config",
-        }
-    
-    # Make the API request
-    url = f"{instance_url}/api/now/table/rm_story"
-    
-    params = {
-        "sysparm_limit": validated_params.limit,
-        "sysparm_offset": validated_params.offset,
-        "sysparm_query": query,
-        "sysparm_display_value": "true",
-    }
-    
     try:
-        response = requests.get(url, headers=headers, params=params)
+        # Build the query
+        builder = QueryBuilder()
+        if validated_params.sprint_id:
+            builder.eq("sprint", validated_params.sprint_id)
+        epic_val = validated_params.epic_id or validated_params.epic
+        if epic_val:
+            builder.eq("epic", epic_val)
+        if validated_params.state:
+            builder.eq("state", validated_params.state)
+        if validated_params.assigned_to:
+            builder.eq("assigned_to", validated_params.assigned_to)
+        if validated_params.assignment_group:
+            builder.eq("assignment_group", validated_params.assignment_group)
+        
+        # Handle timeframe filtering
+        if validated_params.timeframe:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if validated_params.timeframe == "upcoming":
+                builder.gt("start_date", now)
+            elif validated_params.timeframe == "in-progress":
+                builder.lt("start_date", now)
+                builder.gt("end_date", now)
+            elif validated_params.timeframe == "completed":
+                builder.lt("end_date", now)
+        
+        # Add any additional query string
+        if validated_params.query:
+            builder.or_group([
+                ("short_description", "LIKE", validated_params.query),
+                ("description", "LIKE", validated_params.query),
+            ])
+        
+        query = builder.build()
+        
+        # Get the instance URL
+        instance_url = _get_instance_url(auth_manager, server_config)
+        if not instance_url:
+            return {
+                "success": False,
+                "message": "Cannot find instance_url in either server_config or auth_manager",
+            }
+        
+        # Get the headers
+        headers = _get_headers(auth_manager, server_config)
+        if not headers:
+            return {
+                "success": False,
+                "message": "Cannot find get_headers method in either auth_manager or server_config",
+            }
+        
+        # Make the API request
+        url = safe_table_url(instance_url, "rm_story")
+        
+        request_params = {
+            "sysparm_limit": validated_params.limit,
+            "sysparm_offset": validated_params.offset,
+            "sysparm_display_value": "true",
+        }
+        if query:
+            request_params["sysparm_query"] = query
+        
+        response = requests.get(url, headers=headers, params=request_params)
         response.raise_for_status()
         
         result = response.json()
@@ -459,7 +475,7 @@ def list_stories(
             "count": count,
             "total": count,  # Use count as total if total is not provided
         }
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Error listing stories: {e}")
         return {
             "success": False,
@@ -493,49 +509,53 @@ def list_story_dependencies(
     
     validated_params = result["params"]
     
-    # Build the query
-    query_parts = []
-    
-    if validated_params.dependent_story:
-        query_parts.append(f"dependent_story={validated_params.dependent_story}")
-    if validated_params.prerequisite_story:
-        query_parts.append(f"prerequisite_story={validated_params.prerequisite_story}")
-    
-    # Add any additional query string
-    if validated_params.query:
-        query_parts.append(validated_params.query)
-    
-    # Combine query parts
-    query = "^".join(query_parts) if query_parts else ""
-    
-    # Get the instance URL
-    instance_url = _get_instance_url(auth_manager, server_config)
-    if not instance_url:
-        return {
-            "success": False,
-            "message": "Cannot find instance_url in either server_config or auth_manager",
-        }
-    
-    # Get the headers
-    headers = _get_headers(auth_manager, server_config)
-    if not headers:
-        return {
-            "success": False,
-            "message": "Cannot find get_headers method in either auth_manager or server_config",
-        }
-    
-    # Make the API request
-    url = f"{instance_url}/api/now/table/m2m_story_dependencies"
-    
-    params = {
-        "sysparm_limit": validated_params.limit,
-        "sysparm_offset": validated_params.offset,
-        "sysparm_query": query,
-        "sysparm_display_value": "true",
-    }
-    
     try:
-        response = requests.get(url, headers=headers, params=params)
+        # Build the query
+        builder = QueryBuilder()
+        dep_val = validated_params.dependent_story or validated_params.story_id
+        if dep_val:
+            builder.eq("dependent_story", dep_val)
+        prereq_val = validated_params.prerequisite_story or validated_params.prerequisite_story_id
+        if prereq_val:
+            builder.eq("prerequisite_story", prereq_val)
+        
+        # Add any additional query string
+        if validated_params.query:
+            builder.or_group([
+                ("dependent_story", "LIKE", validated_params.query),
+                ("prerequisite_story", "LIKE", validated_params.query),
+            ])
+        
+        query = builder.build()
+        
+        # Get the instance URL
+        instance_url = _get_instance_url(auth_manager, server_config)
+        if not instance_url:
+            return {
+                "success": False,
+                "message": "Cannot find instance_url in either server_config or auth_manager",
+            }
+        
+        # Get the headers
+        headers = _get_headers(auth_manager, server_config)
+        if not headers:
+            return {
+                "success": False,
+                "message": "Cannot find get_headers method in either auth_manager or server_config",
+            }
+        
+        # Make the API request
+        url = safe_table_url(instance_url, "m2m_story_dependencies")
+        
+        request_params = {
+            "sysparm_limit": validated_params.limit,
+            "sysparm_offset": validated_params.offset,
+            "sysparm_display_value": "true",
+        }
+        if query:
+            request_params["sysparm_query"] = query
+        
+        response = requests.get(url, headers=headers, params=request_params)
         response.raise_for_status()
         
         result = response.json()
@@ -550,7 +570,7 @@ def list_story_dependencies(
             "count": count,
             "total": count,  # Use count as total if total is not provided
         }
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Error listing story dependencies: {e}")
         return {
             "success": False,
@@ -611,9 +631,8 @@ def create_story_dependency(
     headers["Content-Type"] = "application/json"
     
     # Make the API request
-    url = f"{instance_url}/api/now/table/m2m_story_dependencies"
-    
     try:
+        url = safe_table_url(instance_url, "m2m_story_dependencies")
         response = requests.post(url, json=data, headers=headers)
         response.raise_for_status()
         
@@ -623,7 +642,7 @@ def create_story_dependency(
             "message": "Story dependency created successfully",
             "story_dependency": result["result"],
         }
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Error creating story dependency: {e}")
         return {
             "success": False,
@@ -674,9 +693,8 @@ def delete_story_dependency(
         }
     
     # Make the API request
-    url = f"{instance_url}/api/now/table/m2m_story_dependencies/{validated_params.dependency_id}"
-    
     try:
+        url = safe_table_url(instance_url, "m2m_story_dependencies", validated_params.dependency_id)
         response = requests.delete(url, headers=headers)
         response.raise_for_status()
         
@@ -684,7 +702,7 @@ def delete_story_dependency(
             "success": True,
             "message": "Story dependency deleted successfully",
         }
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Error deleting story dependency: {e}")
         return {
             "success": False,

@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 
 from servicenow_mcp.auth.auth_manager import AuthManager
 from servicenow_mcp.utils.config import ServerConfig
+from servicenow_mcp.utils.query import QueryBuilder, QueryInputError
+from servicenow_mcp.utils.url import safe_table_url, SafeUrlError
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +169,6 @@ def create_user(
     Returns:
         Response with the created user details.
     """
-    api_url = f"{config.api_url}/table/sys_user"
 
     # Build request data
     data = {
@@ -195,6 +196,7 @@ def create_user(
 
     # Make request
     try:
+        api_url = safe_table_url(config.api_url, "sys_user")
         response = requests.post(
             api_url,
             json=data,
@@ -216,7 +218,7 @@ def create_user(
             user_name=result.get("user_name"),
         )
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to create user: {e}")
         return UserResponse(
             success=False,
@@ -240,8 +242,6 @@ def update_user(
     Returns:
         Response with the updated user details.
     """
-    api_url = f"{config.api_url}/table/sys_user/{params.user_id}"
-
     # Build request data
     data = {}
     if params.user_name:
@@ -271,6 +271,7 @@ def update_user(
 
     # Make request
     try:
+        api_url = safe_table_url(config.api_url, "sys_user", params.user_id)
         response = requests.patch(
             api_url,
             json=data,
@@ -292,7 +293,7 @@ def update_user(
             user_name=result.get("user_name"),
         )
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to update user: {e}")
         return UserResponse(
             success=False,
@@ -316,24 +317,24 @@ def get_user(
     Returns:
         Dictionary containing user details.
     """
-    api_url = f"{config.api_url}/table/sys_user"
-    query_params = {}
-
-    # Build query parameters
-    if params.user_id:
-        query_params["sysparm_query"] = f"sys_id={params.user_id}"
-    elif params.user_name:
-        query_params["sysparm_query"] = f"user_name={params.user_name}"
-    elif params.email:
-        query_params["sysparm_query"] = f"email={params.email}"
-    else:
-        return {"success": False, "message": "At least one search parameter is required"}
-
-    query_params["sysparm_limit"] = "1"
-    query_params["sysparm_display_value"] = "true"
-
-    # Make request
     try:
+        api_url = safe_table_url(config.api_url, "sys_user")
+        query_params = {}
+
+        # Build query parameters
+        if params.user_id:
+            query_params["sysparm_query"] = QueryBuilder().eq("sys_id", params.user_id).build()
+        elif params.user_name:
+            query_params["sysparm_query"] = QueryBuilder().eq("user_name", params.user_name).build()
+        elif params.email:
+            query_params["sysparm_query"] = QueryBuilder().eq("email", params.email).build()
+        else:
+            return {"success": False, "message": "At least one search parameter is required"}
+
+        query_params["sysparm_limit"] = "1"
+        query_params["sysparm_display_value"] = "true"
+
+        # Make request
         response = requests.get(
             api_url,
             params=query_params,
@@ -348,7 +349,7 @@ def get_user(
 
         return {"success": True, "message": "User found", "user": result[0]}
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to get user: {e}")
         return {"success": False, "message": f"Failed to get user: {str(e)}"}
 
@@ -369,29 +370,32 @@ def list_users(
     Returns:
         Dictionary containing list of users.
     """
-    api_url = f"{config.api_url}/table/sys_user"
-    query_params = {
-        "sysparm_limit": str(params.limit),
-        "sysparm_offset": str(params.offset),
-        "sysparm_display_value": "true",
-    }
-
-    # Build query
-    query_parts = []
-    if params.active is not None:
-        query_parts.append(f"active={str(params.active).lower()}")
-    if params.department:
-        query_parts.append(f"department={params.department}")
-    if params.query:
-        query_parts.append(
-            f"^nameLIKE{params.query}^ORuser_nameLIKE{params.query}^ORemailLIKE{params.query}"
-        )
-
-    if query_parts:
-        query_params["sysparm_query"] = "^".join(query_parts)
-
-    # Make request
     try:
+        api_url = safe_table_url(config.api_url, "sys_user")
+        query_params = {
+            "sysparm_limit": str(params.limit),
+            "sysparm_offset": str(params.offset),
+            "sysparm_display_value": "true",
+        }
+
+        # Build query
+        builder = QueryBuilder()
+        if params.active is not None:
+            builder.eq("active", params.active)
+        if params.department:
+            builder.eq("department", params.department)
+        if params.query:
+            builder.or_group([
+                ("name", "LIKE", params.query),
+                ("user_name", "LIKE", params.query),
+                ("email", "LIKE", params.query),
+            ])
+
+        query_str = builder.build()
+        if query_str:
+            query_params["sysparm_query"] = query_str
+
+        # Make request
         response = requests.get(
             api_url,
             params=query_params,
@@ -409,7 +413,7 @@ def list_users(
             "count": len(result),
         }
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to list users: {e}")
         return {"success": False, "message": f"Failed to list users: {str(e)}"}
 
@@ -430,27 +434,31 @@ def list_groups(
     Returns:
         Dictionary containing list of groups.
     """
-    api_url = f"{config.api_url}/table/sys_user_group"
-    query_params = {
-        "sysparm_limit": str(params.limit),
-        "sysparm_offset": str(params.offset),
-        "sysparm_display_value": "true",
-    }
-
-    # Build query
-    query_parts = []
-    if params.active is not None:
-        query_parts.append(f"active={str(params.active).lower()}")
-    if params.type:
-        query_parts.append(f"type={params.type}")
-    if params.query:
-        query_parts.append(f"^nameLIKE{params.query}^ORdescriptionLIKE{params.query}")
-
-    if query_parts:
-        query_params["sysparm_query"] = "^".join(query_parts)
-
-    # Make request
     try:
+        api_url = safe_table_url(config.api_url, "sys_user_group")
+        query_params = {
+            "sysparm_limit": str(params.limit),
+            "sysparm_offset": str(params.offset),
+            "sysparm_display_value": "true",
+        }
+
+        # Build query
+        builder = QueryBuilder()
+        if params.active is not None:
+            builder.eq("active", params.active)
+        if params.type:
+            builder.eq("type", params.type)
+        if params.query:
+            builder.or_group([
+                ("name", "LIKE", params.query),
+                ("description", "LIKE", params.query),
+            ])
+
+        query_str = builder.build()
+        if query_str:
+            query_params["sysparm_query"] = query_str
+
+        # Make request
         response = requests.get(
             api_url,
             params=query_params,
@@ -468,7 +476,7 @@ def list_groups(
             "count": len(result),
         }
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to list groups: {e}")
         return {"success": False, "message": f"Failed to list groups: {str(e)}"}
 
@@ -492,7 +500,7 @@ def assign_roles_to_user(
         Boolean indicating success.
     """
     # For each role, create a user_role record
-    api_url = f"{config.api_url}/table/sys_user_has_role"
+    api_url = safe_table_url(config.api_url, "sys_user_has_role")
 
     success = True
     for role in roles:
@@ -544,13 +552,12 @@ def get_role_id(
     Returns:
         sys_id of the role if found, None otherwise.
     """
-    api_url = f"{config.api_url}/table/sys_user_role"
-    query_params = {
-        "sysparm_query": f"name={role_name}",
-        "sysparm_limit": "1",
-    }
-
     try:
+        api_url = safe_table_url(config.api_url, "sys_user_role")
+        query_params = {
+            "sysparm_query": QueryBuilder().eq("name", role_name).build(),
+            "sysparm_limit": "1",
+        }
         response = requests.get(
             api_url,
             params=query_params,
@@ -565,7 +572,7 @@ def get_role_id(
 
         return result[0].get("sys_id")
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to get role ID: {e}")
         return None
 
@@ -588,13 +595,12 @@ def check_user_has_role(
     Returns:
         Boolean indicating whether the user has the role.
     """
-    api_url = f"{config.api_url}/table/sys_user_has_role"
-    query_params = {
-        "sysparm_query": f"user={user_id}^role={role_id}",
-        "sysparm_limit": "1",
-    }
-
     try:
+        api_url = safe_table_url(config.api_url, "sys_user_has_role")
+        query_params = {
+            "sysparm_query": QueryBuilder().eq("user", user_id).eq("role", role_id).build(),
+            "sysparm_limit": "1",
+        }
         response = requests.get(
             api_url,
             params=query_params,
@@ -606,7 +612,7 @@ def check_user_has_role(
         result = response.json().get("result", [])
         return len(result) > 0
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to check if user has role: {e}")
         return False
 
@@ -627,8 +633,6 @@ def create_group(
     Returns:
         Response with the created group details.
     """
-    api_url = f"{config.api_url}/table/sys_user_group"
-
     # Build request data
     data = {
         "name": params.name,
@@ -648,6 +652,7 @@ def create_group(
 
     # Make request
     try:
+        api_url = safe_table_url(config.api_url, "sys_user_group")
         response = requests.post(
             api_url,
             json=data,
@@ -674,7 +679,7 @@ def create_group(
             group_name=result.get("name"),
         )
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to create group: {e}")
         return GroupResponse(
             success=False,
@@ -698,8 +703,6 @@ def update_group(
     Returns:
         Response with the updated group details.
     """
-    api_url = f"{config.api_url}/table/sys_user_group/{params.group_id}"
-
     # Build request data
     data = {}
     if params.name:
@@ -719,6 +722,7 @@ def update_group(
 
     # Make request
     try:
+        api_url = safe_table_url(config.api_url, "sys_user_group", params.group_id)
         response = requests.patch(
             api_url,
             json=data,
@@ -736,7 +740,7 @@ def update_group(
             group_name=result.get("name"),
         )
 
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Failed to update group: {e}")
         return GroupResponse(
             success=False,
@@ -760,7 +764,15 @@ def add_group_members(
     Returns:
         Response with the result of the operation.
     """
-    api_url = f"{config.api_url}/table/sys_user_grmember"
+    try:
+        api_url = safe_table_url(config.api_url, "sys_user_grmember")
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Failed to build table URL: {e}")
+        return GroupResponse(
+            success=False,
+            message=str(e),
+            group_id=params.group_id,
+        )
 
     success = True
     failed_members = []
@@ -794,7 +806,7 @@ def add_group_members(
                 timeout=config.timeout,
             )
             response.raise_for_status()
-        except requests.RequestException as e:
+        except (requests.RequestException, SafeUrlError, QueryInputError) as e:
             logger.error(f"Failed to add member '{member}' to group: {e}")
             success = False
             failed_members.append(member)
@@ -845,14 +857,14 @@ def remove_group_members(
                 failed_members.append(member)
                 continue
 
-        # Find and delete the group membership
-        api_url = f"{config.api_url}/table/sys_user_grmember"
-        query_params = {
-            "sysparm_query": f"group={params.group_id}^user={user_id}",
-            "sysparm_limit": "1",
-        }
-
         try:
+            # Find and delete the group membership
+            api_url = safe_table_url(config.api_url, "sys_user_grmember")
+            query_params = {
+                "sysparm_query": QueryBuilder().eq("group", params.group_id).eq("user", user_id).build(),
+                "sysparm_limit": "1",
+            }
+
             # First find the membership record
             response = requests.get(
                 api_url,
@@ -868,9 +880,9 @@ def remove_group_members(
                 failed_members.append(member)
                 continue
 
-            # Then delete the membership record
+            # Then delete the membership record using safe_table_url
             membership_id = result[0].get("sys_id")
-            delete_url = f"{api_url}/{membership_id}"
+            delete_url = safe_table_url(config.api_url, "sys_user_grmember", membership_id)
 
             response = requests.delete(
                 delete_url,
@@ -879,7 +891,7 @@ def remove_group_members(
             )
             response.raise_for_status()
 
-        except requests.RequestException as e:
+        except (requests.RequestException, SafeUrlError, QueryInputError) as e:
             logger.error(f"Failed to remove member '{member}' from group: {e}")
             success = False
             failed_members.append(member)

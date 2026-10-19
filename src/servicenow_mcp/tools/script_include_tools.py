@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 
 from servicenow_mcp.auth.auth_manager import AuthManager
 from servicenow_mcp.utils.config import ServerConfig
+from servicenow_mcp.utils.query import QueryBuilder, QueryInputError
+from servicenow_mcp.utils.url import safe_table_url, SafeUrlError
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,7 @@ class ListScriptIncludesParams(BaseModel):
     offset: int = Field(0, description="Offset for pagination")
     active: Optional[bool] = Field(None, description="Filter by active status")
     client_callable: Optional[bool] = Field(None, description="Filter by client callable status")
+    api_name: Optional[str] = Field(None, description="Filter by API name")
     query: Optional[str] = Field(None, description="Search query for script includes")
 
 
@@ -88,7 +91,7 @@ def list_script_includes(
     """
     try:
         # Build the URL
-        url = f"{config.instance_url}/api/now/table/sys_script_include"
+        url = safe_table_url(config.instance_url, "sys_script_include")
         
         # Build query parameters
         query_params = {
@@ -99,20 +102,20 @@ def list_script_includes(
             "sysparm_fields": "sys_id,name,script,description,api_name,client_callable,active,access,sys_created_on,sys_updated_on,sys_created_by,sys_updated_by"
         }
         
-        # Add filters if provided
-        query_parts = []
-        
+        # Add filters if provided using QueryBuilder
+        builder = QueryBuilder()
         if params.active is not None:
-            query_parts.append(f"active={str(params.active).lower()}")
-            
+            builder.eq("active", params.active)
         if params.client_callable is not None:
-            query_parts.append(f"client_callable={str(params.client_callable).lower()}")
-            
+            builder.eq("client_callable", params.client_callable)
+        if params.api_name:
+            builder.eq("api_name", params.api_name)
         if params.query:
-            query_parts.append(f"nameLIKE{params.query}")
+            builder.like("name", params.query)
             
-        if query_parts:
-            query_params["sysparm_query"] = "^".join(query_parts)
+        query_str = builder.build()
+        if query_str:
+            query_params["sysparm_query"] = query_str
             
         # Make the request
         headers = auth_manager.get_headers()
@@ -192,11 +195,11 @@ def get_script_include(
         # Determine if we're querying by sys_id or name
         if params.script_include_id.startswith("sys_id:"):
             sys_id = params.script_include_id.replace("sys_id:", "")
-            url = f"{config.instance_url}/api/now/table/sys_script_include/{sys_id}"
+            url = safe_table_url(config.instance_url, "sys_script_include", sys_id)
         else:
             # Query by name
-            url = f"{config.instance_url}/api/now/table/sys_script_include"
-            query_params["sysparm_query"] = f"name={params.script_include_id}"
+            url = safe_table_url(config.instance_url, "sys_script_include")
+            query_params["sysparm_query"] = QueryBuilder().eq("name", params.script_include_id).build()
             
         # Make the request
         headers = auth_manager.get_headers()
@@ -274,9 +277,6 @@ def create_script_include(
     Returns:
         A response indicating the result of the operation.
     """
-    # Build the URL
-    url = f"{config.instance_url}/api/now/table/sys_script_include"
-    
     # Build the request body
     body = {
         "name": params.name,
@@ -296,6 +296,7 @@ def create_script_include(
     headers = auth_manager.get_headers()
     
     try:
+        url = safe_table_url(config.instance_url, "sys_script_include")
         response = requests.post(
             url,
             json=body,
@@ -358,9 +359,6 @@ def update_script_include(
     script_include = get_result["script_include"]
     sys_id = script_include["sys_id"]
     
-    # Build the URL
-    url = f"{config.instance_url}/api/now/table/sys_script_include/{sys_id}"
-    
     # Build the request body
     body = {}
     
@@ -395,6 +393,7 @@ def update_script_include(
     headers = auth_manager.get_headers()
     
     try:
+        url = safe_table_url(config.instance_url, "sys_script_include", sys_id)
         response = requests.patch(
             url,
             json=body,
@@ -458,13 +457,11 @@ def delete_script_include(
     sys_id = script_include["sys_id"]
     name = script_include["name"]
     
-    # Build the URL
-    url = f"{config.instance_url}/api/now/table/sys_script_include/{sys_id}"
-    
     # Make the request
     headers = auth_manager.get_headers()
     
     try:
+        url = safe_table_url(config.instance_url, "sys_script_include", sys_id)
         response = requests.delete(
             url,
             headers=headers,

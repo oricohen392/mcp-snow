@@ -26,6 +26,7 @@ from servicenow_mcp.utils.config import ServerConfig
 from servicenow_mcp.utils.dates import utc_now_string
 from servicenow_mcp.utils.http import sn_get
 from servicenow_mcp.utils.query import QueryBuilder, QueryInputError, is_sys_id
+from servicenow_mcp.utils.url import safe_table_url, SafeUrlError
 
 logger = logging.getLogger(__name__)
 
@@ -233,9 +234,9 @@ def _get_instance_url(auth_manager: AuthManager, server_config: ServerConfig) ->
     Returns:
         The instance URL if found, None otherwise.
     """
-    if hasattr(server_config, 'instance_url'):
+    if getattr(server_config, 'instance_url', None):
         return server_config.instance_url
-    elif hasattr(auth_manager, 'instance_url'):
+    elif getattr(auth_manager, 'instance_url', None):
         return auth_manager.instance_url
     else:
         logger.error("Cannot find instance_url in either server_config or auth_manager")
@@ -341,10 +342,8 @@ def create_change_request(
     # Add Content-Type header
     headers["Content-Type"] = "application/json"
     
-    # Make the API request
-    url = f"{instance_url}/api/now/table/change_request"
-    
     try:
+        url = safe_table_url(instance_url, "change_request")
         response = requests.post(url, json=data, headers=headers)
         response.raise_for_status()
         
@@ -355,7 +354,7 @@ def create_change_request(
             "message": "Change request created successfully",
             "change_request": result["result"],
         }
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Error creating change request: {e}")
         return {
             "success": False,
@@ -435,10 +434,8 @@ def update_change_request(
     # Add Content-Type header
     headers["Content-Type"] = "application/json"
     
-    # Make the API request
-    url = f"{instance_url}/api/now/table/change_request/{validated_params.change_id}"
-    
     try:
+        url = safe_table_url(instance_url, "change_request", validated_params.change_id)
         response = requests.put(url, json=data, headers=headers)
         response.raise_for_status()
         
@@ -449,7 +446,7 @@ def update_change_request(
             "message": "Change request updated successfully",
             "change_request": result["result"],
         }
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Error updating change request: {e}")
         return {
             "success": False,
@@ -677,10 +674,8 @@ def add_change_task(
     # Add Content-Type header
     headers["Content-Type"] = "application/json"
     
-    # Make the API request
-    url = f"{instance_url}/api/now/table/change_task"
-    
     try:
+        url = safe_table_url(instance_url, "change_task")
         response = requests.post(url, json=data, headers=headers)
         response.raise_for_status()
         
@@ -691,7 +686,7 @@ def add_change_task(
             "message": "Change task added successfully",
             "change_task": result["result"],
         }
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Error adding change task: {e}")
         return {
             "success": False,
@@ -718,7 +713,7 @@ def submit_change_for_approval(
     # Unwrap and validate parameters
     result = _unwrap_and_validate_params(
         params, 
-        SubmitChangeForApprovalParams,
+        SubmitChangeForApprovalParams, 
         required_fields=["change_id"]
     )
     
@@ -755,15 +750,13 @@ def submit_change_for_approval(
     # Add Content-Type header
     headers["Content-Type"] = "application/json"
     
-    # Make the API request
-    url = f"{instance_url}/api/now/table/change_request/{validated_params.change_id}"
-    
     try:
+        url = safe_table_url(instance_url, "change_request", validated_params.change_id)
         response = requests.patch(url, json=data, headers=headers)
         response.raise_for_status()
         
         # Now, create an approval request
-        approval_url = f"{instance_url}/api/now/table/sysapproval_approver"
+        approval_url = safe_table_url(instance_url, "sysapproval_approver")
         approval_data = {
             "document_id": validated_params.change_id,
             "source_table": "change_request",
@@ -780,7 +773,7 @@ def submit_change_for_approval(
             "message": "Change request submitted for approval successfully",
             "approval": approval_result["result"],
         }
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Error submitting change for approval: {e}")
         return {
             "success": False,
@@ -832,15 +825,15 @@ def approve_change(
             "message": "Cannot find get_headers method in either auth_manager or server_config",
         }
     
-    # First, find the approval record
-    approval_query_url = f"{instance_url}/api/now/table/sysapproval_approver"
-    
-    query_params = {
-        "sysparm_query": f"document_id={validated_params.change_id}",
-        "sysparm_limit": 1,
-    }
-    
     try:
+        # First, find the approval record
+        approval_query_url = safe_table_url(instance_url, "sysapproval_approver")
+        
+        query_params = {
+            "sysparm_query": QueryBuilder().eq("document_id", validated_params.change_id).build(),
+            "sysparm_limit": 1,
+        }
+        
         approval_response = requests.get(approval_query_url, headers=headers, params=query_params)
         approval_response.raise_for_status()
         
@@ -855,7 +848,7 @@ def approve_change(
         approval_id = approval_result["result"][0]["sys_id"]
         
         # Now, update the approval record to approved
-        approval_update_url = f"{instance_url}/api/now/table/sysapproval_approver/{approval_id}"
+        approval_update_url = safe_table_url(instance_url, "sysapproval_approver", approval_id)
         headers["Content-Type"] = "application/json"
         
         approval_data = {
@@ -869,7 +862,7 @@ def approve_change(
         approval_update_response.raise_for_status()
         
         # Finally, update the change request state to "implement"
-        change_url = f"{instance_url}/api/now/table/change_request/{validated_params.change_id}"
+        change_url = safe_table_url(instance_url, "change_request", validated_params.change_id)
         
         change_data = {
             "state": "implement",  # This may vary depending on ServiceNow configuration
@@ -882,7 +875,7 @@ def approve_change(
             "success": True,
             "message": "Change request approved successfully",
         }
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Error approving change: {e}")
         return {
             "success": False,
@@ -934,15 +927,15 @@ def reject_change(
             "message": "Cannot find get_headers method in either auth_manager or server_config",
         }
     
-    # First, find the approval record
-    approval_query_url = f"{instance_url}/api/now/table/sysapproval_approver"
-    
-    query_params = {
-        "sysparm_query": f"document_id={validated_params.change_id}",
-        "sysparm_limit": 1,
-    }
-    
     try:
+        # First, find the approval record
+        approval_query_url = safe_table_url(instance_url, "sysapproval_approver")
+        
+        query_params = {
+            "sysparm_query": QueryBuilder().eq("document_id", validated_params.change_id).build(),
+            "sysparm_limit": 1,
+        }
+        
         approval_response = requests.get(approval_query_url, headers=headers, params=query_params)
         approval_response.raise_for_status()
         
@@ -957,7 +950,7 @@ def reject_change(
         approval_id = approval_result["result"][0]["sys_id"]
         
         # Now, update the approval record to rejected
-        approval_update_url = f"{instance_url}/api/now/table/sysapproval_approver/{approval_id}"
+        approval_update_url = safe_table_url(instance_url, "sysapproval_approver", approval_id)
         headers["Content-Type"] = "application/json"
         
         approval_data = {
@@ -969,7 +962,7 @@ def reject_change(
         approval_update_response.raise_for_status()
         
         # Finally, update the change request state to "canceled"
-        change_url = f"{instance_url}/api/now/table/change_request/{validated_params.change_id}"
+        change_url = safe_table_url(instance_url, "change_request", validated_params.change_id)
         
         change_data = {
             "state": "canceled",  # This may vary depending on ServiceNow configuration
@@ -983,7 +976,7 @@ def reject_change(
             "success": True,
             "message": "Change request rejected successfully",
         }
-    except requests.exceptions.RequestException as e:
+    except (requests.exceptions.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Error rejecting change: {e}")
         return {
             "success": False,

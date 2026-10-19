@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field
 
 from servicenow_mcp.auth.auth_manager import AuthManager
 from servicenow_mcp.utils.config import ServerConfig
+from servicenow_mcp.utils.query import QueryBuilder, QueryInputError
+from servicenow_mcp.utils.url import safe_table_url, SafeUrlError
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,7 @@ class ListWorkflowsParams(BaseModel):
     offset: Optional[int] = Field(0, description="Offset to start from")
     active: Optional[bool] = Field(None, description="Filter by active status")
     name: Optional[str] = Field(None, description="Filter by name (contains)")
+    table: Optional[str] = Field(None, description="Filter by table")
     query: Optional[str] = Field(None, description="Additional query string")
 
 
@@ -88,7 +91,8 @@ class DeactivateWorkflowParams(BaseModel):
 class AddWorkflowActivityParams(BaseModel):
     """Parameters for adding an activity to a workflow."""
     
-    workflow_version_id: str = Field(..., description="Workflow version ID")
+    workflow_version_id: Optional[str] = Field(None, description="Workflow version ID")
+    workflow_id: Optional[str] = Field(None, description="Workflow ID or sys_id")
     name: str = Field(..., description="Name of the activity")
     description: Optional[str] = Field(None, description="Description of the activity")
     activity_type: str = Field(..., description="Type of activity (e.g., 'approval', 'task', 'notification')")
@@ -211,25 +215,26 @@ def list_workflows(
         "sysparm_offset": params.get("offset", 0),
     }
     
-    # Build query string
-    query_parts = []
-    
-    if params.get("active") is not None:
-        query_parts.append(f"active={str(params['active']).lower()}")
-    
-    if params.get("name"):
-        query_parts.append(f"nameLIKE{params['name']}")
-    
-    if params.get("query"):
-        query_parts.append(params["query"])
-    
-    if query_parts:
-        query_params["sysparm_query"] = "^".join(query_parts)
-    
     # Make the API request
     try:
+        builder = QueryBuilder()
+        if params.get("active") is not None:
+            builder.eq("active", params["active"])
+        if params.get("table"):
+            builder.eq("table", params["table"])
+        if params.get("name"):
+            builder.like("name", params["name"])
+        if params.get("query"):
+            builder.or_group([
+                ("name", "LIKE", params["query"]),
+                ("description", "LIKE", params["query"]),
+            ])
+        query_str = builder.build()
+        if query_str:
+            query_params["sysparm_query"] = query_str
+
         headers = auth_manager.get_headers()
-        url = f"{server_config.instance_url}/api/now/table/wf_workflow"
+        url = safe_table_url(server_config.instance_url, "wf_workflow")
         
         response = requests.get(url, headers=headers, params=query_params)
         response.raise_for_status()
@@ -240,7 +245,7 @@ def list_workflows(
             "count": len(result.get("result", [])),
             "total": int(response.headers.get("X-Total-Count", 0)),
         }
-    except requests.RequestException as e:
+    except (requests.RequestException, SafeUrlError, QueryInputError) as e:
         logger.error(f"Error listing workflows: {e}")
         return {"error": str(e)}
     except Exception as e:
@@ -280,7 +285,7 @@ def get_workflow_details(
     # Make the API request
     try:
         headers = auth_manager.get_headers()
-        url = f"{server_config.instance_url}/api/now/table/wf_workflow/{workflow_id}"
+        url = safe_table_url(server_config.instance_url, "wf_workflow", workflow_id)
         
         response = requests.get(url, headers=headers)
         response.raise_for_status()
@@ -329,7 +334,7 @@ def list_workflow_versions(
     
     # Convert parameters to ServiceNow query format
     query_params = {
-        "sysparm_query": f"workflow={workflow_id}",
+        "sysparm_query": QueryBuilder().eq("workflow", workflow_id).build(),
         "sysparm_limit": params.get("limit", 10),
         "sysparm_offset": params.get("offset", 0),
     }
@@ -337,7 +342,7 @@ def list_workflow_versions(
     # Make the API request
     try:
         headers = auth_manager.get_headers()
-        url = f"{server_config.instance_url}/api/now/table/wf_workflow_version"
+        url = safe_table_url(server_config.instance_url, "wf_workflow_version")
         
         response = requests.get(url, headers=headers, params=query_params)
         response.raise_for_status()
@@ -393,11 +398,10 @@ def get_workflow_activities(
     if not version_id:
         try:
             headers = auth_manager.get_headers()
-            version_url = f"{server_config.instance_url}/api/now/table/wf_workflow_version"
+            version_url = safe_table_url(server_config.instance_url, "wf_workflow_version")
             version_params = {
-                "sysparm_query": f"workflow={workflow_id}^published=true",
+                "sysparm_query": QueryBuilder().eq("workflow", workflow_id).eq("published", True).order_by("version", descending=True).build(),
                 "sysparm_limit": 1,
-                "sysparm_orderby": "version DESC",
             }
             
             version_response = requests.get(version_url, headers=headers, params=version_params)
@@ -423,10 +427,9 @@ def get_workflow_activities(
     # Get activities for the version
     try:
         headers = auth_manager.get_headers()
-        activities_url = f"{server_config.instance_url}/api/now/table/wf_activity"
+        activities_url = safe_table_url(server_config.instance_url, "wf_activity")
         activities_params = {
-            "sysparm_query": f"workflow_version={version_id}",
-            "sysparm_orderby": "order",
+            "sysparm_query": QueryBuilder().eq("workflow_version", version_id).order_by("order").build(),
         }
         
         activities_response = requests.get(activities_url, headers=headers, params=activities_params)
@@ -498,7 +501,7 @@ def create_workflow(
     # Make the API request
     try:
         headers = auth_manager.get_headers()
-        url = f"{server_config.instance_url}/api/now/table/wf_workflow"
+        url = safe_table_url(server_config.instance_url, "wf_workflow")
         
         response = requests.post(url, headers=headers, json=data)
         response.raise_for_status()
@@ -571,7 +574,7 @@ def update_workflow(
     # Make the API request
     try:
         headers = auth_manager.get_headers()
-        url = f"{server_config.instance_url}/api/now/table/wf_workflow/{workflow_id}"
+        url = safe_table_url(server_config.instance_url, "wf_workflow", workflow_id)
         
         response = requests.patch(url, headers=headers, json=data)
         response.raise_for_status()
@@ -627,7 +630,7 @@ def activate_workflow(
     # Make the API request
     try:
         headers = auth_manager.get_headers()
-        url = f"{server_config.instance_url}/api/now/table/wf_workflow/{workflow_id}"
+        url = safe_table_url(server_config.instance_url, "wf_workflow", workflow_id)
         
         response = requests.patch(url, headers=headers, json=data)
         response.raise_for_status()
@@ -683,7 +686,7 @@ def deactivate_workflow(
     # Make the API request
     try:
         headers = auth_manager.get_headers()
-        url = f"{server_config.instance_url}/api/now/table/wf_workflow/{workflow_id}"
+        url = safe_table_url(server_config.instance_url, "wf_workflow", workflow_id)
         
         response = requests.patch(url, headers=headers, json=data)
         response.raise_for_status()
@@ -727,19 +730,63 @@ def add_workflow_activity(
         logger.error(f"Error getting auth and config: {e}")
         return {"error": str(e)}
     
-    # Validate required parameters
+    workflow_id = params.get("workflow_id")
     workflow_version_id = params.get("workflow_version_id")
+    
     if not workflow_version_id:
-        return {"error": "Workflow version ID is required"}
+        if not workflow_id:
+            return {"error": "Either workflow_version_id or workflow_id is required"}
+        try:
+            headers = auth_manager.get_headers()
+            version_url = safe_table_url(server_config.instance_url, "wf_workflow_version")
+            version_params = {
+                "sysparm_query": QueryBuilder().eq("workflow", workflow_id).order_by("version", descending=True).build(),
+                "sysparm_limit": 1,
+            }
+            version_response = requests.get(version_url, headers=headers, params=version_params)
+            version_response.raise_for_status()
+            versions = version_response.json().get("result", [])
+            if not versions:
+                return {
+                    "error": f"No versions found for workflow {workflow_id}",
+                    "workflow_id": workflow_id,
+                }
+            workflow_version_id = versions[0]["sys_id"]
+        except requests.RequestException as e:
+            logger.error(f"Error getting workflow version: {e}")
+            return {"error": str(e)}
+        except Exception as e:
+            logger.error(f"Unexpected error getting workflow version: {e}")
+            return {"error": str(e)}
     
     activity_name = params.get("name")
     if not activity_name:
         return {"error": "Activity name is required"}
     
+    order = params.get("order")
+    if order is None:
+        try:
+            headers = auth_manager.get_headers()
+            order_url = safe_table_url(server_config.instance_url, "wf_activity")
+            order_params = {
+                "sysparm_query": QueryBuilder().eq("workflow_version", workflow_version_id).order_by("order", descending=True).build(),
+                "sysparm_limit": 1,
+            }
+            order_response = requests.get(order_url, headers=headers, params=order_params)
+            order_response.raise_for_status()
+            existing_activities = order_response.json().get("result", [])
+            if existing_activities and "order" in existing_activities[0]:
+                order = int(existing_activities[0]["order"]) + 100
+            else:
+                order = 100
+        except Exception:
+            order = 100
+
     # Prepare data for the API request
     data = {
         "workflow_version": workflow_version_id,
         "name": activity_name,
+        "order": order,
     }
     
     if params.get("description"):
@@ -755,16 +802,20 @@ def add_workflow_activity(
     # Make the API request
     try:
         headers = auth_manager.get_headers()
-        url = f"{server_config.instance_url}/api/now/table/wf_activity"
+        url = safe_table_url(server_config.instance_url, "wf_activity")
         
         response = requests.post(url, headers=headers, json=data)
         response.raise_for_status()
         
         result = response.json()
-        return {
+        resp_data = {
             "activity": result.get("result", {}),
-            "message": "Workflow activity added successfully",
+            "message": "Activity added successfully",
+            "version_id": workflow_version_id,
         }
+        if workflow_id:
+            resp_data["workflow_id"] = workflow_id
+        return resp_data
     except requests.RequestException as e:
         logger.error(f"Error adding workflow activity: {e}")
         return {"error": str(e)}
@@ -822,7 +873,7 @@ def update_workflow_activity(
     # Make the API request
     try:
         headers = auth_manager.get_headers()
-        url = f"{server_config.instance_url}/api/now/table/wf_activity/{activity_id}"
+        url = safe_table_url(server_config.instance_url, "wf_activity", activity_id)
         
         response = requests.patch(url, headers=headers, json=data)
         response.raise_for_status()
@@ -873,7 +924,7 @@ def delete_workflow_activity(
     # Make the API request
     try:
         headers = auth_manager.get_headers()
-        url = f"{server_config.instance_url}/api/now/table/wf_activity/{activity_id}"
+        url = safe_table_url(server_config.instance_url, "wf_activity", activity_id)
         
         response = requests.delete(url, headers=headers)
         response.raise_for_status()
@@ -933,7 +984,7 @@ def reorder_workflow_activities(
             # Calculate the new order value (100, 200, 300, etc.)
             new_order = (i + 1) * 100
             
-            url = f"{server_config.instance_url}/api/now/table/wf_activity/{activity_id}"
+            url = safe_table_url(server_config.instance_url, "wf_activity", activity_id)
             data = {"order": new_order}
             
             try:
@@ -996,7 +1047,7 @@ def delete_workflow(
     # Make the API request
     try:
         headers = auth_manager.get_headers()
-        url = f"{server_config.instance_url}/api/now/table/wf_workflow/{workflow_id}"
+        url = safe_table_url(server_config.instance_url, "wf_workflow", workflow_id)
         
         response = requests.delete(url, headers=headers)
         response.raise_for_status()

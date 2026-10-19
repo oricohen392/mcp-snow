@@ -1,7 +1,7 @@
 
 import unittest
 from unittest.mock import MagicMock, patch
-from servicenow_mcp.tools.incident_tools import get_incident_by_number, GetIncidentByNumberParams
+from servicenow_mcp.tools.incident_tools import get_incident, get_incident_by_number, GetIncidentByNumberParams
 from servicenow_mcp.utils.config import ServerConfig, AuthConfig, AuthType, BasicAuthConfig
 from servicenow_mcp.auth.auth_manager import AuthManager
 
@@ -74,5 +74,38 @@ class TestIncidentTools(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["message"], "Incident not found: INC9999999")
 
+    @patch('requests.get')
+    def test_get_incident_wrapper(self, mock_get):
+        config = ServerConfig(instance_url="https://dev12345.service-now.com", auth=self.auth_config)
+        auth_manager = MagicMock(spec=AuthManager)
+        auth_manager.get_headers.return_value = {"Authorization": "Bearer FAKE_TOKEN"}
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "result": [
+                {
+                    "sys_id": "12345",
+                    "number": "INC0010001",
+                    "short_description": "Test incident",
+                }
+            ]
+        }
+        mock_get.return_value = mock_response
+
+        # Test with dict
+        res_dict = get_incident(config, auth_manager, {"incident_number": "INC0010001"})
+        self.assertTrue(res_dict["success"])
+        self.assertEqual(res_dict["incident"]["number"], "INC0010001")
+
+        # Test with string
+        res_str = get_incident(config, auth_manager, "INC0010001")
+        self.assertTrue(res_str["success"])
+
+        # Test with path traversal sys_id
+        res_traversal = get_incident(config, auth_manager, "../../incident")
+        self.assertFalse(res_traversal["success"])
+
 if __name__ == '__main__':
     unittest.main()
+

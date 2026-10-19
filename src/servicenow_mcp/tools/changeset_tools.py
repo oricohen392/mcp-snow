@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 
 from servicenow_mcp.auth.auth_manager import AuthManager
 from servicenow_mcp.utils.config import ServerConfig
+from servicenow_mcp.utils.query import QueryBuilder, QueryInputError
+from servicenow_mcp.utils.url import safe_table_url, SafeUrlError
 
 logger = logging.getLogger(__name__)
 
@@ -235,36 +237,32 @@ def list_changesets(
         "sysparm_offset": validated_params.offset,
     }
     
-    # Build sysparm_query
-    query_parts = []
-    
-    if validated_params.state:
-        query_parts.append(f"state={validated_params.state}")
-    
-    if validated_params.application:
-        query_parts.append(f"application={validated_params.application}")
-    
-    if validated_params.developer:
-        query_parts.append(f"developer={validated_params.developer}")
-    
-    if validated_params.timeframe:
-        if validated_params.timeframe == "recent":
-            query_parts.append("sys_created_onONLast 7 days@javascript:gs.beginningOfLast7Days()@javascript:gs.endOfToday()")
-        elif validated_params.timeframe == "last_week":
-            query_parts.append("sys_created_onONLast week@javascript:gs.beginningOfLastWeek()@javascript:gs.endOfLastWeek()")
-        elif validated_params.timeframe == "last_month":
-            query_parts.append("sys_created_onONLast month@javascript:gs.beginningOfLastMonth()@javascript:gs.endOfLastMonth()")
-    
-    if validated_params.query:
-        query_parts.append(validated_params.query)
-    
-    if query_parts:
-        query_params["sysparm_query"] = "^".join(query_parts)
-    
-    # Make the API request
-    url = f"{instance_url}/api/now/table/sys_update_set"
-    
     try:
+        url = safe_table_url(instance_url, "sys_update_set")
+        builder = QueryBuilder()
+        if validated_params.state:
+            builder.eq("state", validated_params.state)
+        if validated_params.application:
+            builder.eq("application", validated_params.application)
+        if validated_params.developer:
+            builder.eq("sys_created_by", validated_params.developer)
+        if validated_params.query:
+            builder.or_group([
+                ("name", "LIKE", validated_params.query),
+                ("description", "LIKE", validated_params.query),
+            ])
+        if validated_params.timeframe:
+            if validated_params.timeframe == "recent":
+                builder._terms.append("sys_created_onONLast 7 days@javascript:gs.beginningOfLast7Days()@javascript:gs.endOfToday()")
+            elif validated_params.timeframe == "last_week":
+                builder._terms.append("sys_created_onONLast week@javascript:gs.beginningOfLastWeek()@javascript:gs.endOfLastWeek()")
+            elif validated_params.timeframe == "last_month":
+                builder._terms.append("sys_created_onONLast month@javascript:gs.beginningOfLastMonth()@javascript:gs.endOfLastMonth()")
+        
+        built_query = builder.build()
+        if built_query:
+            query_params["sysparm_query"] = built_query
+
         response = requests.get(url, params=query_params, headers=headers)
         response.raise_for_status()
         
@@ -274,6 +272,12 @@ def list_changesets(
             "success": True,
             "changesets": result.get("result", []),
             "count": len(result.get("result", [])),
+        }
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error listing changesets: {e}")
+        return {
+            "success": False,
+            "message": f"Validation error listing changesets: {str(e)}",
         }
     except requests.exceptions.RequestException as e:
         logger.error(f"Error listing changesets: {e}")
@@ -327,10 +331,10 @@ def get_changeset_details(
             "message": "Cannot find get_headers method in either auth_manager or server_config",
         }
     
-    # Make the API request
-    url = f"{instance_url}/api/now/table/sys_update_set/{validated_params.changeset_id}"
-    
     try:
+        # Make the API request
+        url = safe_table_url(instance_url, "sys_update_set", validated_params.changeset_id)
+        
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         
@@ -340,9 +344,9 @@ def get_changeset_details(
         changeset = result.get("result", {})
         
         # Get the changes in this changeset
-        changes_url = f"{instance_url}/api/now/table/sys_update_xml"
+        changes_url = safe_table_url(instance_url, "sys_update_xml")
         changes_params = {
-            "sysparm_query": f"update_set={validated_params.changeset_id}",
+            "sysparm_query": QueryBuilder().eq("update_set", validated_params.changeset_id).build(),
         }
         
         changes_response = requests.get(changes_url, params=changes_params, headers=headers)
@@ -356,6 +360,12 @@ def get_changeset_details(
             "changeset": changeset,
             "changes": changes,
             "change_count": len(changes),
+        }
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error getting changeset details: {e}")
+        return {
+            "success": False,
+            "message": f"Validation error getting changeset details: {str(e)}",
         }
     except requests.exceptions.RequestException as e:
         logger.error(f"Error getting changeset details: {e}")
@@ -424,10 +434,10 @@ def create_changeset(
     # Add Content-Type header
     headers["Content-Type"] = "application/json"
     
-    # Make the API request
-    url = f"{instance_url}/api/now/table/sys_update_set"
-    
     try:
+        # Make the API request
+        url = safe_table_url(instance_url, "sys_update_set")
+        
         response = requests.post(url, json=data, headers=headers)
         response.raise_for_status()
         
@@ -437,6 +447,12 @@ def create_changeset(
             "success": True,
             "message": "Changeset created successfully",
             "changeset": result["result"],
+        }
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error creating changeset: {e}")
+        return {
+            "success": False,
+            "message": f"Validation error creating changeset: {str(e)}",
         }
     except requests.exceptions.RequestException as e:
         logger.error(f"Error creating changeset: {e}")
@@ -513,10 +529,10 @@ def update_changeset(
     # Add Content-Type header
     headers["Content-Type"] = "application/json"
     
-    # Make the API request
-    url = f"{instance_url}/api/now/table/sys_update_set/{validated_params.changeset_id}"
-    
     try:
+        # Make the API request
+        url = safe_table_url(instance_url, "sys_update_set", validated_params.changeset_id)
+        
         response = requests.patch(url, json=data, headers=headers)
         response.raise_for_status()
         
@@ -526,6 +542,12 @@ def update_changeset(
             "success": True,
             "message": "Changeset updated successfully",
             "changeset": result["result"],
+        }
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error updating changeset: {e}")
+        return {
+            "success": False,
+            "message": f"Validation error updating changeset: {str(e)}",
         }
     except requests.exceptions.RequestException as e:
         logger.error(f"Error updating changeset: {e}")
@@ -591,10 +613,10 @@ def commit_changeset(
     # Add Content-Type header
     headers["Content-Type"] = "application/json"
     
-    # Make the API request
-    url = f"{instance_url}/api/now/table/sys_update_set/{validated_params.changeset_id}"
-    
     try:
+        # Make the API request
+        url = safe_table_url(instance_url, "sys_update_set", validated_params.changeset_id)
+        
         response = requests.patch(url, json=data, headers=headers)
         response.raise_for_status()
         
@@ -604,6 +626,12 @@ def commit_changeset(
             "success": True,
             "message": "Changeset committed successfully",
             "changeset": result["result"],
+        }
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error committing changeset: {e}")
+        return {
+            "success": False,
+            "message": f"Validation error committing changeset: {str(e)}",
         }
     except requests.exceptions.RequestException as e:
         logger.error(f"Error committing changeset: {e}")
@@ -669,10 +697,10 @@ def publish_changeset(
     if validated_params.publish_notes:
         data["description"] = validated_params.publish_notes
     
-    # Make the API request
-    url = f"{instance_url}/api/now/table/sys_update_set/{validated_params.changeset_id}"
-    
     try:
+        # Make the API request
+        url = safe_table_url(instance_url, "sys_update_set", validated_params.changeset_id)
+        
         response = requests.patch(url, json=data, headers=headers)
         response.raise_for_status()
         
@@ -682,6 +710,12 @@ def publish_changeset(
             "success": True,
             "message": "Changeset published successfully",
             "changeset": result["result"],
+        }
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error publishing changeset: {e}")
+        return {
+            "success": False,
+            "message": f"Validation error publishing changeset: {str(e)}",
         }
     except requests.exceptions.RequestException as e:
         logger.error(f"Error publishing changeset: {e}")
@@ -746,10 +780,10 @@ def add_file_to_changeset(
         "type": "file",
     }
     
-    # Make the API request
-    url = f"{instance_url}/api/now/table/sys_update_xml"
-    
     try:
+        # Make the API request
+        url = safe_table_url(instance_url, "sys_update_xml")
+        
         response = requests.post(url, json=data, headers=headers)
         response.raise_for_status()
         
@@ -759,6 +793,12 @@ def add_file_to_changeset(
             "success": True,
             "message": "File added to changeset successfully",
             "file": result["result"],
+        }
+    except (SafeUrlError, QueryInputError) as e:
+        logger.error(f"Validation error adding file to changeset: {e}")
+        return {
+            "success": False,
+            "message": f"Validation error adding file to changeset: {str(e)}",
         }
     except requests.exceptions.RequestException as e:
         logger.error(f"Error adding file to changeset: {e}")
