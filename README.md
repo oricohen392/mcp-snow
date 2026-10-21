@@ -155,15 +155,24 @@ uvicorn.run(app, host="0.0.0.0", port=8080)
 `list_incidents`, `list_change_requests`, `list_requests` (sc_request) and `list_request_items` (sc_req_item) accept:
 
 - `number` (exact, list allowed, prefix-checked)
-- `assignment_group` (partial, case-insensitive: `NOC` matches `INOC_1`; comma-separated = OR) and `assignment_group_exact`
-- `assigned_to`, `active`
+- `status_scope`: `open` (every active state, `active=true`), `closed` or `all`. Default `all`, except **`list_change_requests`, which defaults to `open`**; the default is not applied when `number` or `state` is given. `active` is an alias.
+- `assignment_group`: every word must appear in the group name, in any order (`תשתיות ענן` also finds `ענן - תשתיות Tier2`; `NOC` finds `INOC_1`). Comma-separated means OR. The groups are looked up in `sys_user_group` first and the response lists them in `matched_groups`; a name that matches no group is an error (`no_matching_group`), not "0 results". `include_child_groups=true` adds child groups. `assignment_group_exact` matches the exact name.
+- `assigned_to`
 - `state`/`priority`/`category` (and change `type`/`risk`) given as labels or values, translated through the instance's `sys_choice`
 - `created_after/before`, `updated_after/before` (and change `start_*`/`end_*`) as ISO dates with an optional `timezone`
-- `query` (free text), `order_by`, `descending`, `limit`, `offset`
+- `query` (free text), `order_by`, `descending`, `limit` (capped at `MAX_LIMIT`, default 500), `offset`
 
-Every response includes `query_used` (the exact `sysparm_query`), `total_count` (`X-Total-Count`), `returned`, `limit` and `offset`.
+Every list response includes:
+- `query_used` (the exact `sysparm_query`) and `filters_description` (the same in plain words)
+- `total_count` (`X-Total-Count`), `returned`, `has_more` and `next_offset` (the message says how many records are not shown and how to get the next page)
+- `count_ignoring_status` whenever a status filter narrowed the list, with a `status_note` if records in other statuses were left out
+- `matched_groups` when `assignment_group` was used
 
-An HTTP 200 with no rows adds a `hint`: either nothing matched, or ACLs/domain separation hide the rows. Run `check_access` to see the user, its roles and per-table visible counts. HTTP or network errors are `success: false` with `status_code` and `error_type`, never "0 results". Use `search_groups` to discover real group names. User values containing `^` or control characters are rejected.
+Lists return a fixed set of fields per table (change requests no longer return every raw field) and cut `description` at 200 characters; the `get_*` tools return the full text.
+
+`count_records(table, filters…, status_scope, group_by)` counts records exactly through the Aggregate API (`/api/now/stats`), by default in **every** state, and returns `scope_description`, a sentence saying what was counted and as which ServiceNow user. Use it for "how many" questions instead of counting list results. If the Aggregate API is not allowed, it falls back to `X-Total-Count` (without `group_by`).
+
+An HTTP 200 with no rows adds a `hint`: either nothing matched, or ACLs/domain separation hide the rows. Run `check_access` to see the user, its roles, per-table visible counts and whether the Aggregate API is usable. HTTP or network errors are `success: false` with `status_code` and `error_type`, never "0 results". Use `search_groups` to discover real group names. User values containing `^` or control characters are rejected.
 
 ### Image and offline build
 
@@ -183,7 +192,7 @@ The image installs a wheel (not editable) into `/opt/venv`, runs as UID 1001, an
 oc exec deploy/servicenow-mcp -- servicenow-mcp-smoke --group NOC --mcp-url http://localhost:8080/sse
 ```
 
-This prints `check_access`, `search_groups("NOC")` and one list per table with `query_used`, `total_count` and `returned`. It then connects over MCP/SSE like Dify does and lists the tools.
+This prints `check_access`, `search_groups(<group>)`, one list per table with `query_used`, `filters_description`, `matched_groups`, `total_count`, `count_ignoring_status` and paging, and three `count_records` calls (all incidents, open incidents by state, incidents of `<group>`). Compare those numbers with the ServiceNow UI. It then connects over MCP/SSE like Dify does and lists the tools. Group names can be Hebrew: `--group "תשתיות ענן"`.
 
 ## Tool Packaging (Optional)
 

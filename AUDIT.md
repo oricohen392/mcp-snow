@@ -304,3 +304,76 @@ None of these could be checked here. Run `servicenow-mcp-smoke` in the pod first
 16. **The account can read** `sys_user` (its own record) and `sys_user_has_role` for `check_access` identity and roles. This is optional; `check_access` reports when they can't be read.
 17. **If you expose the server through an OpenShift Route** rather than the in-cluster Service: there must be no path prefix (the SSE `endpoint` is the relative `/messages/`), and the route timeout must be long, e.g. `haproxy.router.openshift.io/timeout: 1h`.
 18. **`DEFAULT_TIMEZONE`** should match how users phrase dates, e.g. `Asia/Jerusalem`. It is UTC unless set.
+19. **The Aggregate API (`/api/now/stats/<table>`) is allowed** for the integration user (`check_access` → `aggregate_api.available`). Without it, `count_records` and `count_ignoring_status` fall back to `X-Total-Count`, and `group_by` is unavailable.
+20. **`sysparm_display_value=all` on the Aggregate API** returns `display_value` in `groupby_fields`. If your instance returns only `value`, `group_by` breakdowns show raw values (for example `2` instead of `In Progress`); the counts are still correct.
+21. **`sys_user_group` is readable**, so group names can be resolved to sys_ids. If it isn't (403), the old `assignment_group.nameLIKE<text>` filter is used and a warning says so.
+22. **The integration user has the `itil` role** (or equivalent). Without it, the out-of-box incident query business rule limits it to incidents it opened or is listed on. That would make every count too low without any error, and is one possible explanation for "1598".
+23. **The Table API has no lower row cap than 500** (`MAX_LIMIT`). If your instance limits REST responses (for example through a REST API rate or response-size policy), lower `MAX_LIMIT` to that value; paging with `next_offset` still reaches every record.
+24. **The "cloud infrastructure" group(s)** are the assignment groups your teams actually use. If tickets also sit in child groups with unrelated names, pass `include_child_groups=true`. Check `matched_groups` in the response against what you expect.
+
+---
+
+## Part 4: Follow-up after the first Dify run (ServiceNow Zurich)
+
+**Verification status: unit-tested and mock-tested only.** Same as Part 2: nothing here was run against your instance. The ServiceNow APIs used (Table API, Aggregate API `/api/now/stats`) are standard REST APIs available in Zurich; no Zurich-specific behavior was verified.
+
+### Reported symptoms and the likely causes in the code
+
+| # | Symptom in Dify | Likely cause (from the code; the actual Dify trace / `query_used` was not available) |
+|---|---|---|
+| 1 | "Cloud infrastructure" INCs: 6 of the 9 that exist | The group filter was a single `assignment_group.nameLIKE<whole text>`. A multi-word name matches only if the words appear in that exact order and spacing, so a second group named e.g. `ענן - תשתיות Tier2` was missed. The LLM may also have added `active`/`state` on its own. The response did not show which groups matched or how many records the status filter removed, so the gap was invisible. |
+| 2 | Hard to get relevant "activities" (change requests) | The LLM had to guess state labels to mean "everything still active". `list_change_requests` also returned every raw field (~150 per record), so long lists were hard for the model to use. |
+| 3 | "Only 1598 open incidents ever" | There was no counting tool. The model read `total_count` of a filtered list (probably `active=true`) and presented it as "ever". An account without `itil` would also undercount (assumption 22). |
+| 4 | Won't show more than a certain number of records | `MAX_LIMIT` capped every list at 100, and nothing told the model to fetch the next page. |
+
+### Commits
+
+| Commit | Topic |
+|---|---|
+| `groups: resolve assignment groups by words, report matched_groups` | Every word of `assignment_group` must appear in the group name, in any order. Groups are looked up in `sys_user_group`; the list filters `assignment_groupIN<sys_ids>` and returns `matched_groups`. `include_child_groups`. An unknown name returns `no_matching_group`. A 403 on `sys_user_group` or more than 100 matches falls back to the old LIKE, with a warning. `search_groups` uses the same word matching. |
+| `status_scope: open/closed/all, change default open, count_ignoring_status` | `status_scope` on every list tool (`active` is an alias). `list_change_requests` defaults to `open` = every active state. When a status filter narrows a list, the same filters are counted in any status (`count_ignoring_status`, plus a `status_note`). Adds `filters_description`. |
+| `count_records: exact counts through the Aggregate API` | New read-only tool. Defaults to every state; optional `group_by`; returns `scope_description` (count, ServiceNow user, every filter in words). Falls back to `X-Total-Count`. `check_access` reports whether the Aggregate API is usable. |
+| `paging: MAX_LIMIT 500, has_more/next_offset, compact list payloads` | `MAX_LIMIT` default is 500. Adds `has_more`/`next_offset` and an explicit "N more, call again with offset=…" message. `sysparm_fields` per table, compact change records, and descriptions cut at 200 characters in lists. |
+| `smoke: print filters, matched_groups, paging and count_records results` | The in-pod smoke test shows the new fields and three counts to compare with the UI. |
+
+### Behavior changes
+
+1. `list_change_requests` without a status filter now sends `active=true`. It returns only changes in an active state unless you pass `status_scope='all'`, a `number` or a `state`.
+2. `list_change_requests` records contain the fields in `CHANGE_FIELDS` (`tools/ticket_query.py`) instead of every raw field. `get_change_request_details` is unchanged and still returns the full record.
+3. `assignment_group` now resolves groups first. A name that matches no group returns `success=false` with `error_type=no_matching_group` instead of an empty list.
+4. In list results, `description` is cut at 200 characters.
+5. `MAX_LIMIT` defaults to 500 instead of 100.
+6. Each `assignment_group` lookup costs one extra request, up to three more with `include_child_groups`. A status-filtered list costs one extra count request. A failed count never fails the list.
+
+### Test results
+
+The Docker daemon was not available during this round, so the suite ran in a local Python 3.12 virtualenv with the versions from `requirements.lock` (mcp 1.3.0, pydantic 2.10.6). The same 3 un-importable modules were ignored.
+
+```
+previous round (container):  331 passed, 10 failed, 5 errors
+this round (local venv):     378 passed, 10 failed, 5 errors
+```
+
+The 15 failing and erroring test IDs are the same baseline set as in Part 2. New tests in this round: 47.
+
+| File | Tests | Covers |
+|---|---|---|
+| `test_group_resolution.py` | 10 | Hebrew words in any order, separators, `matched_groups`, child groups, inactive fallback, unknown group → `no_matching_group`, sys_id skip, 403 → LIKE fallback, 401 reported, more than 100 matches |
+| `test_status_scope.py` | 14 | open/closed/all, `active` alias and contradiction, change default `open` and when it is not applied, `count_ignoring_status` (query without status), Aggregate API 403 fallback, a count failure does not break the list, `filters_description` |
+| `test_count_records.py` | 16 | default `all`, change default `all`, group and status filters, `group_by` sorted breakdown, invalid table/group_by/filter combinations, X-Total-Count fallback, `group_by` without the Aggregate API, 401/500/timeout, malformed stats body |
+| `test_paging.py` | 7 | `has_more`/`next_offset` and message, last page, no `X-Total-Count`, MAX_LIMIT 500, `sysparm_fields`, compact change records, truncation in lists but not in get |
+
+Existing tests updated for the new semantics: group expectations in `test_query_builder.py`, `test_change_tools.py::test_list_change_requests_with_filters` and `test_smoke_test.py`; change queries now start with `active=true`; the limit cap test uses 500. The image was not rebuilt in this round.
+
+### How to check against your instance
+
+```bash
+oc exec deploy/servicenow-mcp -- servicenow-mcp-smoke --group "תשתיות ענן" --mcp-url http://localhost:8080/sse
+```
+
+Compare against the ServiceNow UI:
+- `matched_groups` should be exactly the groups you consider "cloud infrastructure".
+- `count_records(incident, every state ever)` should equal the record count of an unfiltered incident list in the UI. If it is much lower, check the roles printed by `check_access` (assumption 22).
+- `total_count` and `count_ignoring_status` for the group should add up to the 9 incidents you saw in the UI.
+
+In Dify, the response fields `filters_description`, `matched_groups`, `count_ignoring_status` and `scope_description` show what the model actually asked for.
