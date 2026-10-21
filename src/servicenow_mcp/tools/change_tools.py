@@ -19,6 +19,7 @@ from servicenow_mcp.tools.ticket_query import (
     number_description,
     order_description,
     run_list,
+    status_scope_description,
     validate_numbers,
 )
 from servicenow_mcp.utils import settings
@@ -67,6 +68,7 @@ class UpdateChangeRequestParams(BaseModel):
 class ListChangeRequestsParams(TaskListParamsBase):
     """Parameters for listing change requests."""
 
+    status_scope: Optional[str] = Field(None, description=status_scope_description("open"))
     number: Optional[str] = Field(None, description=number_description(CHANGE_REQUEST))
     state: Optional[str] = Field(
         None,

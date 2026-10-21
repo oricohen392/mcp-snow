@@ -98,7 +98,8 @@ def test_group_filter_on_change(config, auth):
     fake = FakeServiceNow(groups=DEFAULT_GROUPS)
     with patch("requests.get", side_effect=fake):
         result = list_change_requests(auth, config, {"assignment_group": "NOC"})
-    assert fake.last_query("change_request") == NOC_IDS + ORDER
+    # change requests default to status_scope='open' (every active state)
+    assert fake.last_query("change_request") == "active=true^" + NOC_IDS + ORDER
     assert result["query_used"] == fake.last_query("change_request")
 
 
@@ -183,7 +184,7 @@ def test_change_planned_dates_and_timeframe(config, auth):
         )
         bad = list_change_requests(auth, config, {"timeframe": "next-week"})
     assert result["query_used"] == (
-        "start_date>=2024-06-01 00:00:00^end_date<2024-06-30 00:00:00" + ORDER
+        "active=true^start_date>=2024-06-01 00:00:00^end_date<2024-06-30 00:00:00" + ORDER
     )
     assert bad["success"] is False and "upcoming" in bad["message"]
 
@@ -300,7 +301,7 @@ def test_change_order_by_start_date(config, auth):
     fake = FakeServiceNow()
     with patch("requests.get", side_effect=fake):
         result = list_change_requests(auth, config, {"order_by": "start_date"})
-    assert result["query_used"] == "ORDERBYDESCstart_date"
+    assert result["query_used"] == "active=true^ORDERBYDESCstart_date"
 
 
 def test_timeout_and_tls_settings_used(config, auth, monkeypatch):

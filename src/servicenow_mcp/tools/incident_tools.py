@@ -13,12 +13,14 @@ from pydantic import BaseModel, Field
 from servicenow_mcp.auth.auth_manager import AuthManager
 from servicenow_mcp.tools.ticket_query import (
     INCIDENT,
+    INCIDENT_SCOPE_NOTE,
     TaskListParamsBase,
     choice_description,
     order_description,
     number_description,
     run_get_by_number,
     run_list,
+    status_scope_description,
 )
 from servicenow_mcp.utils.config import ServerConfig
 
@@ -79,6 +81,9 @@ class ListIncidentsParams(TaskListParamsBase):
     """Parameters for listing incidents."""
 
     number: Optional[str] = Field(None, description=number_description(INCIDENT))
+    status_scope: Optional[str] = Field(
+        None, description=status_scope_description("all", INCIDENT_SCOPE_NOTE)
+    )
     state: Optional[str] = Field(
         None,
         description=choice_description(

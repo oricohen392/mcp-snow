@@ -412,11 +412,13 @@ def get_tool_definitions(
             list_incidents_tool,
             ListIncidentsParams,
             str,  # Expects JSON string
-            "List/search incidents. Filters: number, state/priority/category (labels such as "
-            "'New' or 'High' are translated via sys_choice), active, assignment_group "
-            "(partial name, e.g. 'NOC'), assignment_group_exact, assigned_to, created/updated "
+            "List/search incidents. Filters: number, status_scope (open/closed/all), "
+            "state/priority/category (labels such as 'New' or 'High' are translated via "
+            "sys_choice), assignment_group (partial name, e.g. 'NOC'; all matching groups are "
+            "listed in matched_groups), assignment_group_exact, assigned_to, created/updated "
             "date ranges, free-text query. Response includes query_used (the exact ServiceNow "
-            "query), total_count and a hint when nothing matched.",
+            "query), filters_description, total_count, count_ignoring_status and a hint when "
+            "nothing matched. For 'how many' questions use count_records.",
             "json",  # Tool returns list/dict, needs JSON dump
         ),
         "get_incident_by_number": (
@@ -574,10 +576,13 @@ def get_tool_definitions(
             list_change_requests_tool,
             ListChangeRequestsParams,
             str,  # Expects JSON string
-            "List/search change requests. Filters: number, state/type/risk/priority/category "
-            "(labels translated via sys_choice), assignment_group (partial name), "
-            "assignment_group_exact, created/updated and planned start/end date ranges, "
-            "timeframe, free-text query. Response includes query_used and total_count.",
+            "List/search change requests (activities / planned work). By DEFAULT returns "
+            "only changes in an active state (status_scope='open'); pass status_scope='all' to "
+            "include closed/canceled. Filters: number, state/type/risk/priority/category "
+            "(labels translated via sys_choice), assignment_group (partial name, all matching "
+            "groups listed in matched_groups), assignment_group_exact, created/updated and "
+            "planned start/end date ranges, timeframe, free-text query. Response includes "
+            "query_used, filters_description, total_count and count_ignoring_status.",
             "json",  # Tool returns list/dict
         ),
         "get_change_request_details": (

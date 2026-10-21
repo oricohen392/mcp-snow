@@ -73,9 +73,22 @@ ASSIGNED_TO_DESC = (
     "user_name / sys_id. Example: 'cohen' or 'jsmith'. Comma-separated for OR."
 )
 ACTIVE_DESC = (
-    "true = only open/active records (not closed/canceled), false = only inactive. "
-    "Use active=true for 'open tickets' instead of a state label."
+    "Same as status_scope: true = 'open', false = 'closed'. Prefer status_scope."
 )
+STATUS_SCOPE_DESC_TMPL = (
+    "Which records by lifecycle: 'open' = EVERY active (not closed/canceled) state, "
+    "'closed' = closed/canceled only, 'all' = any state. Use this, not state labels, when the "
+    "user says open / active / current / in progress overall / closed / all. "
+    "Default: '{default}'{default_note}. The default is not applied when number or state is given. "
+    "The response shows count_ignoring_status, so records in other statuses are never hidden "
+    "silently.{extra}"
+)
+INCIDENT_SCOPE_NOTE = " Note for incidents: Resolved is still active (open) until Closed."
+
+
+def status_scope_description(default: str, extra: str = "") -> str:
+    note = " (open and closed)" if default == "all" else " (all activities in any active state)"
+    return STATUS_SCOPE_DESC_TMPL.format(default=default, default_note=note, extra=extra)
 NUMBER_DESC_TMPL = (
     "Exact record number(s), {prefix} followed by digits, e.g. '{example}'. "
     "Comma-separated for several: '{example},{example2}'."
@@ -125,6 +138,7 @@ class TaskListParamsBase(BaseModel):
 
     limit: int = Field(10, ge=1, description=LIMIT_DESC)
     offset: int = Field(0, ge=0, description=OFFSET_DESC)
+    status_scope: Optional[str] = Field(None, description=status_scope_description("all"))
     active: Optional[bool] = Field(None, description=ACTIVE_DESC)
     assignment_group: Optional[str] = Field(None, description=GROUP_DESC)
     include_child_groups: bool = Field(False, description=CHILD_GROUPS_DESC)
@@ -181,6 +195,7 @@ class TableSpec:
     date_params: Dict[str, Tuple[str, str]] = field(default_factory=dict)
     text_fields: Tuple[str, ...] = ("short_description", "description")
     mapper: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None
+    default_status_scope: str = "all"
 
 
 BASE_DATE_PARAMS = {
@@ -310,6 +325,7 @@ CHANGE_REQUEST = TableSpec(
         "end_before": ("end_date", "<"),
     },
     mapper=None,  # change tools historically return the raw records
+    default_status_scope="open",  # "all activities" = every change in an active state
 )
 
 SC_REQUEST = TableSpec(
@@ -366,6 +382,10 @@ class BuiltQuery:
     limit_capped: bool
     warnings: List[str]
     matched_groups: List[Dict[str, Any]] = field(default_factory=list)
+    status_scope: str = "all"
+    filter_query: str = ""  # the query without ORDERBY (for counting)
+    query_without_status: Optional[str] = None  # set when a status filter narrowed the list
+    filters_description: str = ""
 
 
 def validate_numbers(spec: TableSpec, raw: Any) -> List[str]:
@@ -523,6 +543,51 @@ def _person_or_group_conditions(base: str, items: List[str], name_field: str, ex
     return conditions
 
 
+STATUS_SCOPES = ("open", "closed", "all")
+# Choice parameters that describe where a record is in its lifecycle. When one of
+# them (or status_scope/active) filters the list, the response also reports how
+# many records match the other filters in any status.
+STATUS_CHOICE_PARAMS = ("state", "request_state", "stage")
+STATUS_SCOPE_TEXT = {
+    "open": "status: open = any active state (active=true)",
+    "closed": "status: closed/canceled (active=false)",
+    "all": "status: any (open and closed)",
+}
+
+
+def effective_status_scope(spec: TableSpec, params: BaseModel) -> Tuple[str, bool]:
+    """
+    Return (scope, explicit) from status_scope / active / the table default.
+
+    The table default is not applied when a record number or an explicit state
+    is given: asking for CHG0030001 or state=Closed must not be narrowed to
+    open records.
+    """
+    get = lambda name: getattr(params, name, None)  # noqa: E731
+    scope = get("status_scope")
+    if scope is not None and str(scope).strip():
+        scope = str(scope).strip().lower()
+        if scope not in STATUS_SCOPES:
+            raise QueryInputError(
+                f"status_scope '{scope}' is not valid. Allowed: {', '.join(STATUS_SCOPES)}"
+            )
+    else:
+        scope = None
+    active = get("active")
+    if active is not None:
+        implied = "open" if active else "closed"
+        if scope is not None and scope != implied:
+            raise QueryInputError(
+                f"active={str(active).lower()} contradicts status_scope='{scope}'; pass only one"
+            )
+        return implied, True
+    if scope is not None:
+        return scope, True
+    if get("number") or any(get(p) for p in STATUS_CHOICE_PARAMS if p in spec.choice_params):
+        return "all", False
+    return spec.default_status_scope, False
+
+
 def build_query(
     config: Any,
     auth_manager: Any,
@@ -531,12 +596,19 @@ def build_query(
     extra: Optional[Callable[[QueryBuilder, BaseModel], None]] = None,
 ) -> BuiltQuery:
     """Translate tool params into a sanitized encoded query. Raises QueryInputError."""
-    builder = QueryBuilder()
+    builder = QueryBuilder()  # the full query
+    rest = QueryBuilder()  # the same filters without any status condition
+    both = (builder, rest)
     warnings: List[str] = []
+    described: List[str] = []
+    status_filtered = False
     get = lambda name: getattr(params, name, None)  # noqa: E731
 
     if get("number"):
-        builder.in_("number", validate_numbers(spec, get("number")))
+        numbers = validate_numbers(spec, get("number"))
+        for b in both:
+            b.in_("number", numbers)
+        described.append(f"number in [{', '.join(numbers)}]")
 
     for param_name, choice in spec.choice_params.items():
         raw = get(param_name)
@@ -549,10 +621,22 @@ def build_query(
             config, auth_manager, spec.table, choice.field, items, numeric=choice.numeric
         )
         warnings.extend(resolution.warnings)
-        builder.in_(choice.field, resolution.values)
+        is_status = param_name in STATUS_CHOICE_PARAMS
+        for b in (builder,) if is_status else both:
+            b.in_(choice.field, resolution.values)
+        status_filtered = status_filtered or is_status
+        described.append(
+            f"{param_name} in [{', '.join(items)}] (values {', '.join(resolution.values)})"
+        )
 
-    if get("active") is not None:
-        builder.eq("active", "true" if get("active") else "false")
+    scope, scope_explicit = effective_status_scope(spec, params)
+    if scope != "all":
+        builder.eq("active", "true" if scope == "open" else "false")
+        status_filtered = True
+    scope_text = STATUS_SCOPE_TEXT[scope]
+    if not scope_explicit and scope != "all":
+        scope_text += f" [default for {spec.plural}; status_scope='all' includes closed]"
+    described.append(scope_text)
 
     matched_groups: List[Dict[str, Any]] = []
     if get("assignment_group"):
@@ -578,31 +662,46 @@ def build_query(
             if group_ids:
                 conditions.append(("assignment_group", "IN", group_ids))
             conditions.extend(("assignment_group.name", "LIKE", item) for item in fallback_items)
-            builder.or_group(conditions)
+            for b in both:
+                b.or_group(conditions)
+            names = [g["name"] for g in matched_groups]
+            names += [i for i in items if is_sys_id(i)]
+            names += [f"name contains '{i}'" for i in fallback_items]
+            described.append(f"assignment group in [{', '.join(names)}]")
 
     if get("assignment_group_exact"):
         items = split_list(get("assignment_group_exact"), "assignment_group_exact")
         if items:
-            builder.or_group([("assignment_group.name", "=", item) for item in items])
+            for b in both:
+                b.or_group([("assignment_group.name", "=", item) for item in items])
+            described.append(f"assignment group name is exactly one of [{', '.join(items)}]")
 
     if get("assigned_to"):
         items = split_list(get("assigned_to"), "assigned_to")
         if items:
-            builder.or_group(
-                _person_or_group_conditions("assigned_to", items, "name", "user_name")
-            )
+            for b in both:
+                b.or_group(_person_or_group_conditions("assigned_to", items, "name", "user_name"))
+            described.append(f"assigned to matches [{', '.join(items)}]")
 
     for param_name, (field_name, operator) in spec.date_params.items():
         raw = get(param_name)
         if raw:
-            builder.where(field_name, operator, to_servicenow_utc(raw, get("timezone"), param_name))
+            value = to_servicenow_utc(raw, get("timezone"), param_name)
+            for b in both:
+                b.where(field_name, operator, value)
+            described.append(f"{field_name} {operator} {value} UTC")
 
     if get("query"):
         text = sanitize_value(get("query"), "query")
-        builder.or_group([(f, "LIKE", text) for f in spec.text_fields])
+        for b in both:
+            b.or_group([(f, "LIKE", text) for f in spec.text_fields])
+        described.append(f"text '{text}' in {' or '.join(spec.text_fields)}")
 
     if extra is not None:
-        extra(builder, params)
+        for b in both:
+            extra(b, params)
+        if get("timeframe"):
+            described.append(f"timeframe {get('timeframe')} (relative to now, UTC)")
 
     order_by = get("order_by") or "sys_created_on"
     if order_by not in spec.order_fields:
@@ -610,7 +709,9 @@ def build_query(
             f"order_by '{order_by}' is not allowed. Allowed: {', '.join(spec.order_fields)}"
         )
     descending = get("descending")
-    builder.order_by(order_by, descending=True if descending is None else bool(descending))
+    descending = True if descending is None else bool(descending)
+    builder.order_by(order_by, descending=descending)
+    described.append(f"sorted by {order_by} {'descending' if descending else 'ascending'}")
 
     requested = get("limit") or 10
     cap = settings.max_limit()
@@ -623,6 +724,10 @@ def build_query(
         limit_capped=int(requested) > cap,
         warnings=warnings,
         matched_groups=matched_groups,
+        status_scope=scope,
+        filter_query="^".join(builder.terms),
+        query_without_status="^".join(rest.terms) if status_filtered else None,
+        filters_description=f"{spec.table}: " + "; ".join(described),
     )
 
 
@@ -648,6 +753,98 @@ def query_error_response(exc: Exception, error_prefix: str) -> Dict[str, Any]:
     return _input_error(str(exc), error_prefix, getattr(exc, "error_type", "invalid_input"))
 
 
+@dataclass
+class CountResult:
+    ok: bool
+    count: Optional[int] = None
+    groups: List[Dict[str, Any]] = field(default_factory=list)
+    source: str = "aggregate_api"  # or "x_total_count"
+    warnings: List[str] = field(default_factory=list)
+    error: Optional[Dict[str, Any]] = None
+
+
+def _stats_count(stats: Any) -> Optional[int]:
+    try:
+        return int(str((stats or {}).get("count")))
+    except (TypeError, ValueError):
+        return None
+
+
+def aggregate_count(
+    config: Any,
+    auth_manager: Any,
+    table: str,
+    query: str,
+    group_by: Optional[str] = None,
+) -> CountResult:
+    """
+    Count records with the Aggregate API (GET /api/now/stats/<table>).
+
+    Without group_by, an Aggregate API 403/404 falls back to X-Total-Count of a
+    one-row Table API query. The count is what the integration account can see.
+    """
+    params: Dict[str, Any] = {"sysparm_count": "true", "sysparm_query": query}
+    if group_by:
+        params["sysparm_group_by"] = group_by
+        params["sysparm_display_value"] = "all"
+    result = sn_get(config, auth_manager, f"stats/{table}", params)
+    if result.ok:
+        if not group_by:
+            count = _stats_count(result.records[0].get("stats")) if result.records else None
+            if count is not None:
+                return CountResult(ok=True, count=count)
+        else:
+            groups = []
+            for row in result.records:
+                count = _stats_count(row.get("stats"))
+                fields = row.get("groupby_fields") or [{}]
+                value = fields[0].get("value")
+                if count is None:
+                    break
+                groups.append(
+                    {
+                        "value": value,
+                        "display": fields[0].get("display_value") or value or "(empty)",
+                        "count": count,
+                    }
+                )
+            else:
+                groups.sort(key=lambda g: g["count"], reverse=True)
+                return CountResult(
+                    ok=True, count=sum(g["count"] for g in groups), groups=groups
+                )
+        return CountResult(
+            ok=False,
+            error={
+                "success": False,
+                "status_code": result.status_code,
+                "error_type": "invalid_response",
+                "message": "Aggregate API answered without a usable stats.count.",
+            },
+        )
+
+    if result.error_type in ("forbidden", "not_found") and not group_by:
+        fallback = sn_get(
+            config,
+            auth_manager,
+            f"table/{table}",
+            {"sysparm_query": query, "sysparm_limit": 1, "sysparm_fields": "sys_id"},
+        )
+        if fallback.ok and fallback.total_count is not None:
+            return CountResult(
+                ok=True,
+                count=fallback.total_count,
+                source="x_total_count",
+                warnings=[
+                    f"Aggregate API not available (HTTP {result.status_code}); counted with "
+                    "the Table API X-Total-Count header instead."
+                ],
+            )
+        if not fallback.ok:
+            return CountResult(ok=False, error=fallback.error_dict("Count failed"))
+    return CountResult(ok=False, error=result.error_dict("Count failed"))
+
+
 def run_list(
     config: Any,
     auth_manager: Any,
@@ -665,6 +862,14 @@ def run_list(
         response[records_key] = []
         return response
 
+    # Count the same filters in any status first, so a status filter never hides
+    # records silently ("9 match, 6 of them open").
+    count_ignoring_status = None
+    if built.query_without_status is not None:
+        other = aggregate_count(config, auth_manager, spec.table, built.query_without_status)
+        if other.ok:
+            count_ignoring_status = other.count
+
     sysparms = {
         "sysparm_query": built.query,
         "sysparm_limit": built.limit,
@@ -677,6 +882,8 @@ def run_list(
 
     meta = {
         "query_used": built.query,
+        "filters_description": built.filters_description,
+        "status_scope": built.status_scope,
         "limit": built.limit,
         "offset": built.offset,
     }
@@ -702,6 +909,15 @@ def run_list(
         "total_count": result.total_count,
         **meta,
     }
+    if count_ignoring_status is not None:
+        response["count_ignoring_status"] = count_ignoring_status
+        total = result.total_count
+        if total is not None and count_ignoring_status > total:
+            response["status_note"] = (
+                f"{count_ignoring_status - total} more {spec.plural} match the same filters in "
+                f"other statuses ({total} shown by the status filter, {count_ignoring_status} in "
+                "any status). Use status_scope='all' to include them."
+            )
     if not records:
         response["hint"] = EMPTY_RESULT_HINT
     elif (
