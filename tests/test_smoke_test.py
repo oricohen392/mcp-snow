@@ -23,6 +23,8 @@ def test_smoke_pass(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "query_used : assignment_group=" + "a" * 32 + "^ORDERBYDESCsys_created_on" in out
     assert "search_groups('NOC'): OK" in out
+    assert "count_records(incident, every state ever): OK" in out
+    assert "matched_groups: INOC_1" in out
     assert "never-printed" not in out
     assert "RESULT: PASS" in out
 

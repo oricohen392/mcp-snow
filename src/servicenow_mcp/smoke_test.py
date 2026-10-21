@@ -6,10 +6,12 @@ Smoke test to run inside the pod (or anywhere with the same env vars).
     servicenow-mcp-smoke --mcp-url http://localhost:8080/sse   # also list tools over MCP/SSE
     servicenow-mcp-smoke --mcp-only --mcp-url http://servicenow-mcp.ns.svc:8080/sse
 
-ServiceNow part: check_access, search_groups(<group>), and one list call per
-table (incident, change_request, sc_request, sc_req_item). For each it prints
-success / HTTP status, query_used, total_count and returned. Secrets are never
-printed. Exit code 0 when every call succeeded, 1 otherwise.
+ServiceNow part: check_access, search_groups(<group>), one list call per
+table (incident, change_request, sc_request, sc_req_item) and count_records
+(all incidents, open incidents by state, incidents of <group>). For each it
+prints success / HTTP status, query_used, filters, matched_groups, total_count,
+count_ignoring_status and paging. Secrets are never printed. Exit code 0 when
+every call succeeded, 1 otherwise. Compare the counts with the ServiceNow UI.
 
 MCP part (--mcp-url): connects like Dify does (SSE), runs initialize and
 tools/list, and prints the tool names. Uses MCP_AUTH_TOKEN (or --token) as a
@@ -31,6 +33,7 @@ from servicenow_mcp.tools.access_tools import (
     search_groups,
 )
 from servicenow_mcp.tools.change_tools import list_change_requests
+from servicenow_mcp.tools.count_tools import CountRecordsParams, count_records
 from servicenow_mcp.tools.incident_tools import ListIncidentsParams, list_incidents
 from servicenow_mcp.tools.request_tools import (
     ListRequestItemsParams,
@@ -75,7 +78,17 @@ def _status(result: Dict[str, Any]) -> str:
 def _print_list_result(title: str, result: Dict[str, Any], key: str) -> None:
     print(f"\n== {title}: {_status(result)}")
     print(f"   query_used : {result.get('query_used')}")
-    print(f"   total_count: {result.get('total_count')}   returned: {result.get('returned')}")
+    if result.get("filters_description"):
+        print(f"   filters    : {result['filters_description']}")
+    print(
+        f"   total_count: {result.get('total_count')}   returned: {result.get('returned')}"
+        f"   has_more: {result.get('has_more')}   next_offset: {result.get('next_offset')}"
+    )
+    if result.get("count_ignoring_status") is not None:
+        print(f"   count_ignoring_status: {result['count_ignoring_status']}")
+    if result.get("matched_groups"):
+        names = ", ".join(str(g.get("name")) for g in result["matched_groups"])
+        print(f"   matched_groups: {names}")
     if not result.get("success"):
         print(f"   message    : {result.get('message')}")
     for warning in result.get("warnings", []) or []:
@@ -86,6 +99,20 @@ def _print_list_result(title: str, result: Dict[str, Any], key: str) -> None:
         label = record.get("number") or record.get("name")
         extra = record.get("short_description") or record.get("description") or ""
         print(f"   - {label}: {str(extra)[:80]}")
+
+
+def _print_count_result(title: str, result: Dict[str, Any]) -> None:
+    print(f"\n== {title}: {_status(result)}")
+    print(f"   query_used : {result.get('query_used')}")
+    if result.get("success"):
+        print(f"   count      : {result.get('count')} (source: {result.get('source')})")
+        print(f"   scope      : {result.get('scope_description')}")
+    else:
+        print(f"   message    : {result.get('message')}")
+    for warning in result.get("warnings", []) or []:
+        print(f"   warning    : {warning}")
+    for row in (result.get("groups") or [])[:10]:
+        print(f"   - {row.get('display')}: {row.get('count')}")
 
 
 def run_servicenow_checks(group: str, limit: int) -> bool:
@@ -149,6 +176,27 @@ def run_servicenow_checks(group: str, limit: int) -> bool:
     for title, call, key in checks:
         result = call()
         _print_list_result(title, result, key)
+        ok = ok and bool(result.get("success"))
+
+    counts: List[Tuple[str, Callable[[], Dict[str, Any]]]] = [
+        (
+            "count_records(incident, every state ever)",
+            lambda: count_records(config, auth, CountRecordsParams(table="incident")),
+        ),
+        (
+            "count_records(incident, open, group_by=state)",
+            lambda: count_records(
+                config, auth, CountRecordsParams(status_scope="open", group_by="state")
+            ),
+        ),
+        (
+            f"count_records(incident, assignment_group='{group}')",
+            lambda: count_records(config, auth, CountRecordsParams(assignment_group=group)),
+        ),
+    ]
+    for title, call in counts:
+        result = call()
+        _print_count_result(title, result)
         ok = ok and bool(result.get("success"))
     return ok
 
