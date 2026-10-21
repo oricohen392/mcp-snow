@@ -114,6 +114,7 @@ from servicenow_mcp.tools.project_tools import (
     list_projects,
 )
 from servicenow_mcp.tools.access_tools import check_access, search_groups
+from servicenow_mcp.tools.count_tools import count_records
 from servicenow_mcp.tools.request_tools import (
     get_request_by_number,
     get_request_item_by_number,
@@ -140,6 +141,7 @@ __all__ = [
     # Discovery tools
     "check_access",
     "search_groups",
+    "count_records",
     
     # Catalog tools
     "list_catalog_items",

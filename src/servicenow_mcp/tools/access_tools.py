@@ -227,6 +227,17 @@ def check_access(
         "tables": tables,
     }
     if reachable:
+        stats = sn_get(config, auth_manager, "stats/incident", {"sysparm_count": "true"})
+        response["aggregate_api"] = {
+            "status_code": stats.status_code,
+            "available": stats.ok,
+            "note": (
+                "count_records uses /api/now/stats"
+                if stats.ok
+                else "Aggregate API not usable; count_records falls back to X-Total-Count "
+                "and cannot group_by."
+            ),
+        }
         response["user"] = _user_identity(config, auth_manager)
         response["message"] = (
             "visible_count comes from X-Total-Count for an unfiltered query and is what this "

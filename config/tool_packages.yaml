@@ -27,6 +27,7 @@ service_desk:
   # Discovery
   - check_access
   - search_groups
+  - count_records
   # User Lookup
   - get_user
   - list_users
@@ -64,6 +65,7 @@ change_coordinator:
   # Discovery
   - check_access
   - search_groups
+  - count_records
   # Change Lifecycle
   - create_change_request
   - update_change_request
@@ -176,6 +178,7 @@ full:
   # Discovery
   - check_access
   - search_groups
+  - count_records
   # Catalog (Core)
   - list_catalogs
   - list_catalog_items

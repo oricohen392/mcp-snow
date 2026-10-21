@@ -5,6 +5,8 @@ from typing import Any, Callable, Dict, Tuple, Type
 from servicenow_mcp.tools.access_tools import CheckAccessParams, SearchGroupsParams
 from servicenow_mcp.tools.access_tools import check_access as check_access_tool
 from servicenow_mcp.tools.access_tools import search_groups as search_groups_tool
+from servicenow_mcp.tools.count_tools import CountRecordsParams
+from servicenow_mcp.tools.count_tools import count_records as count_records_tool
 from servicenow_mcp.tools.request_tools import (
     GetRequestByNumberParams,
     GetRequestItemByNumberParams,
@@ -468,6 +470,17 @@ def get_tool_definitions(
             "instance host, and per table (incident, change_request, sc_request, sc_req_item, "
             "sys_user_group, sys_choice) whether it is readable and how many rows this account "
             "can see. Use when a list returns 0 results unexpectedly.",
+            "json",
+        ),
+        "count_records": (
+            count_records_tool,
+            CountRecordsParams,
+            str,
+            "Count incidents, change requests, requests or requested items exactly (Aggregate "
+            "API), optionally grouped by state, priority, assignment_group, ... Use this for "
+            "every 'how many' question instead of counting list results. Default status_scope "
+            "is 'all' (every record ever created, any state). Same filters as the list tools. "
+            "Repeat scope_description to the user so it is clear what was counted.",
             "json",
         ),
         "search_groups": (
@@ -1037,7 +1050,7 @@ def get_tool_definitions(
 # Tools whose names start with these prefixes only read data. Everything else
 # (create_*, update_*, add_*, resolve_*, approve_*, publish_*, ...) is treated as
 # a write tool and is hidden while READ_ONLY=true.
-READ_TOOL_PREFIXES = ("list_", "get_", "search_", "check_")
+READ_TOOL_PREFIXES = ("list_", "get_", "search_", "check_", "count_")
 
 
 def is_read_tool(tool_name: str) -> bool:

@@ -30,6 +30,7 @@ ITSM_TOOLS = [
     "get_request_item_by_number",
     "search_groups",
     "check_access",
+    "count_records",
 ]
 
 

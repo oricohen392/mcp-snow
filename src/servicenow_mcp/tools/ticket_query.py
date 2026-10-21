@@ -133,11 +133,9 @@ def order_description(fields: Tuple[str, ...]) -> str:
     )
 
 
-class TaskListParamsBase(BaseModel):
-    """Filters shared by all task list tools."""
+class TaskFilterParams(BaseModel):
+    """Filters shared by all task list and count tools."""
 
-    limit: int = Field(10, ge=1, description=LIMIT_DESC)
-    offset: int = Field(0, ge=0, description=OFFSET_DESC)
     status_scope: Optional[str] = Field(None, description=status_scope_description("all"))
     active: Optional[bool] = Field(None, description=ACTIVE_DESC)
     assignment_group: Optional[str] = Field(None, description=GROUP_DESC)
@@ -150,7 +148,6 @@ class TaskListParamsBase(BaseModel):
     updated_before: Optional[str] = Field(None, description=date_description("Last updated", "before", "<"))
     timezone: Optional[str] = Field(None, description=TIMEZONE_DESC)
     query: Optional[str] = Field(None, description=QUERY_DESC)
-    descending: bool = Field(True, description=DESCENDING_DESC)
 
     @field_validator(
         "assignment_group",
@@ -170,6 +167,14 @@ class TaskListParamsBase(BaseModel):
     @classmethod
     def _accept_lists(cls, value: Any) -> Any:
         return _list_to_text(value)
+
+
+class TaskListParamsBase(TaskFilterParams):
+    """Filters plus paging/sorting shared by all task list tools."""
+
+    limit: int = Field(10, ge=1, description=LIMIT_DESC)
+    offset: int = Field(0, ge=0, description=OFFSET_DESC)
+    descending: bool = Field(True, description=DESCENDING_DESC)
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +391,7 @@ class BuiltQuery:
     filter_query: str = ""  # the query without ORDERBY (for counting)
     query_without_status: Optional[str] = None  # set when a status filter narrowed the list
     filters_description: str = ""
+    filter_parts: List[str] = field(default_factory=list)  # description without sorting
 
 
 def validate_numbers(spec: TableSpec, raw: Any) -> List[str]:
@@ -711,6 +717,7 @@ def build_query(
     descending = get("descending")
     descending = True if descending is None else bool(descending)
     builder.order_by(order_by, descending=descending)
+    filter_parts = list(described)
     described.append(f"sorted by {order_by} {'descending' if descending else 'ascending'}")
 
     requested = get("limit") or 10
@@ -728,6 +735,7 @@ def build_query(
         filter_query="^".join(builder.terms),
         query_without_status="^".join(rest.terms) if status_filtered else None,
         filters_description=f"{spec.table}: " + "; ".join(described),
+        filter_parts=filter_parts,
     )
 
 

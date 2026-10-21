@@ -58,6 +58,7 @@ def test_reports_user_host_and_counts(config, auth):
     assert result["tables"]["change_request"]["visible_count"] == 0
     assert "row-level ACLs" in result["tables"]["change_request"]["note"]
     assert result["tables"]["sc_request"]["readable"] is False
+    assert result["aggregate_api"]["status_code"] == 200
     assert result["tables"]["sc_request"]["status_code"] == 403
     assert "User Not Authorized" in result["tables"]["sc_request"]["note"]
 
