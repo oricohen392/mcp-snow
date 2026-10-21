@@ -53,8 +53,8 @@ def read_only() -> bool:
 
 
 def max_limit() -> int:
-    """MAX_LIMIT (default 100): upper bound for any list tool's limit."""
-    return _env_int("MAX_LIMIT", 100)
+    """MAX_LIMIT (default 500): upper bound for any list tool's limit."""
+    return _env_int("MAX_LIMIT", 500)
 
 
 def choice_cache_ttl_seconds() -> int:

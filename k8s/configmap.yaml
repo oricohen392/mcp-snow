@@ -14,6 +14,6 @@ data:
   # An invalid name makes the pod fail at startup (check the logs).
   MCP_TOOL_PACKAGE: "full"
   LOG_LEVEL: "INFO"            # DEBUG logs every ServiceNow request (path, sysparm_*, status, ms)
-  MAX_LIMIT: "100"
+  MAX_LIMIT: "500"
   DEFAULT_TIMEZONE: "UTC"      # e.g. "Asia/Jerusalem"; used for dates given without an offset
   CHOICE_CACHE_TTL_SECONDS: "3600"

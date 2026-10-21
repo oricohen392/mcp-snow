@@ -109,9 +109,15 @@ TIMEZONE_DESC = (
 )
 LIMIT_DESC = (
     "Maximum records to return (default 10). Values above the server's MAX_LIMIT "
-    "(default 100) are capped; see limit_capped in the response."
+    "(default 500) are capped; see limit_capped in the response. When the user wants all "
+    "matching records, keep calling with offset=next_offset while has_more is true. "
+    "For 'how many' questions use count_records instead of listing."
 )
-OFFSET_DESC = "Number of records to skip, for paging (default 0). Use with total_count."
+OFFSET_DESC = (
+    "Number of records to skip, for paging (default 0). Use next_offset from the previous "
+    "response."
+)
+LIST_DESCRIPTION_CHARS = 200
 DESCENDING_DESC = "Sort descending (newest first) when true (default true)."
 
 
@@ -201,6 +207,7 @@ class TableSpec:
     text_fields: Tuple[str, ...] = ("short_description", "description")
     mapper: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None
     default_status_scope: str = "all"
+    field_map: Optional[Dict[str, str]] = None  # output name -> source field (sysparm_fields)
 
 
 BASE_DATE_PARAMS = {
@@ -223,73 +230,103 @@ def pick(record: Dict[str, Any], mapping: Dict[str, str]) -> Dict[str, Any]:
     return {out: display(record.get(src)) for out, src in mapping.items()}
 
 
+INCIDENT_FIELDS: Dict[str, str] = {
+    "sys_id": "sys_id",
+    "number": "number",
+    "short_description": "short_description",
+    "description": "description",
+    "state": "state",
+    "priority": "priority",
+    "assigned_to": "assigned_to",
+    "assignment_group": "assignment_group",
+    "category": "category",
+    "subcategory": "subcategory",
+    "created_on": "sys_created_on",
+    "updated_on": "sys_updated_on",
+}
+
+
 def map_incident(record: Dict[str, Any]) -> Dict[str, Any]:
-    return pick(
-        record,
-        {
-            "sys_id": "sys_id",
-            "number": "number",
-            "short_description": "short_description",
-            "description": "description",
-            "state": "state",
-            "priority": "priority",
-            "assigned_to": "assigned_to",
-            "assignment_group": "assignment_group",
-            "category": "category",
-            "subcategory": "subcategory",
-            "created_on": "sys_created_on",
-            "updated_on": "sys_updated_on",
-        },
-    )
+    return pick(record, INCIDENT_FIELDS)
+
+
+REQUEST_FIELDS: Dict[str, str] = {
+    "sys_id": "sys_id",
+    "number": "number",
+    "short_description": "short_description",
+    "description": "description",
+    "state": "state",
+    "request_state": "request_state",
+    "approval": "approval",
+    "priority": "priority",
+    "requested_for": "requested_for",
+    "opened_by": "opened_by",
+    "assignment_group": "assignment_group",
+    "assigned_to": "assigned_to",
+    "opened_at": "opened_at",
+    "due_date": "due_date",
+    "created_on": "sys_created_on",
+    "updated_on": "sys_updated_on",
+}
 
 
 def map_request(record: Dict[str, Any]) -> Dict[str, Any]:
-    return pick(
-        record,
-        {
-            "sys_id": "sys_id",
-            "number": "number",
-            "short_description": "short_description",
-            "description": "description",
-            "state": "state",
-            "request_state": "request_state",
-            "approval": "approval",
-            "priority": "priority",
-            "requested_for": "requested_for",
-            "opened_by": "opened_by",
-            "assignment_group": "assignment_group",
-            "assigned_to": "assigned_to",
-            "opened_at": "opened_at",
-            "due_date": "due_date",
-            "created_on": "sys_created_on",
-            "updated_on": "sys_updated_on",
-        },
-    )
+    return pick(record, REQUEST_FIELDS)
+
+
+REQUEST_ITEM_FIELDS: Dict[str, str] = {
+    "sys_id": "sys_id",
+    "number": "number",
+    "short_description": "short_description",
+    "description": "description",
+    "state": "state",
+    "stage": "stage",
+    "approval": "approval",
+    "priority": "priority",
+    "cat_item": "cat_item",
+    "request": "request",
+    "requested_for": "requested_for",
+    "assignment_group": "assignment_group",
+    "assigned_to": "assigned_to",
+    "opened_at": "opened_at",
+    "due_date": "due_date",
+    "created_on": "sys_created_on",
+    "updated_on": "sys_updated_on",
+}
 
 
 def map_request_item(record: Dict[str, Any]) -> Dict[str, Any]:
-    return pick(
-        record,
-        {
-            "sys_id": "sys_id",
-            "number": "number",
-            "short_description": "short_description",
-            "description": "description",
-            "state": "state",
-            "stage": "stage",
-            "approval": "approval",
-            "priority": "priority",
-            "cat_item": "cat_item",
-            "request": "request",
-            "requested_for": "requested_for",
-            "assignment_group": "assignment_group",
-            "assigned_to": "assigned_to",
-            "opened_at": "opened_at",
-            "due_date": "due_date",
-            "created_on": "sys_created_on",
-            "updated_on": "sys_updated_on",
-        },
-    )
+    return pick(record, REQUEST_ITEM_FIELDS)
+
+
+# Change records used to be returned raw (every field, ~150 per record), which
+# made long lists unusable for an LLM. Lists return these fields;
+# get_change_request_details still returns the full record.
+CHANGE_FIELDS: Dict[str, str] = {
+    "sys_id": "sys_id",
+    "number": "number",
+    "short_description": "short_description",
+    "description": "description",
+    "type": "type",
+    "state": "state",
+    "risk": "risk",
+    "impact": "impact",
+    "priority": "priority",
+    "category": "category",
+    "assignment_group": "assignment_group",
+    "assigned_to": "assigned_to",
+    "requested_by": "requested_by",
+    "cmdb_ci": "cmdb_ci",
+    "start_date": "start_date",
+    "end_date": "end_date",
+    "approval": "approval",
+    "created_on": "sys_created_on",
+    "updated_on": "sys_updated_on",
+}
+
+
+def map_change(record: Dict[str, Any]) -> Dict[str, Any]:
+    return pick(record, CHANGE_FIELDS)
 
 
 INCIDENT = TableSpec(
@@ -306,6 +343,7 @@ INCIDENT = TableSpec(
     order_fields=BASE_ORDER,
     date_params=dict(BASE_DATE_PARAMS),
     mapper=map_incident,
+    field_map=INCIDENT_FIELDS,
 )
 
 CHANGE_REQUEST = TableSpec(
@@ -329,7 +367,8 @@ CHANGE_REQUEST = TableSpec(
         "end_after": ("end_date", ">="),
         "end_before": ("end_date", "<"),
     },
-    mapper=None,  # change tools historically return the raw records
+    mapper=map_change,
+    field_map=CHANGE_FIELDS,
     default_status_scope="open",  # "all activities" = every change in an active state
 )
 
@@ -347,6 +386,7 @@ SC_REQUEST = TableSpec(
     order_fields=BASE_ORDER + ("due_date",),
     date_params=dict(BASE_DATE_PARAMS),
     mapper=map_request,
+    field_map=REQUEST_FIELDS,
 )
 
 SC_REQ_ITEM = TableSpec(
@@ -363,6 +403,7 @@ SC_REQ_ITEM = TableSpec(
     order_fields=BASE_ORDER + ("due_date",),
     date_params=dict(BASE_DATE_PARAMS),
     mapper=map_request_item,
+    field_map=REQUEST_ITEM_FIELDS,
 )
 
 
@@ -853,6 +894,26 @@ def aggregate_count(
     return CountResult(ok=False, error=result.error_dict("Count failed"))
 
 
+def _list_message(
+    spec: TableSpec, built: BuiltQuery, returned: int, total: Optional[int], has_more: bool
+) -> str:
+    message = f"Found {returned} {spec.plural}"
+    if returned:
+        first, last = built.offset + 1, built.offset + returned
+        message += f" (records {first}-{last}"
+        message += f" of {total} matching)" if total is not None else ")"
+    message += "."
+    if has_more:
+        remaining = f"{total - built.offset - returned} more" if total is not None else "More"
+        message += (
+            f" {remaining} not shown: call again with offset={built.offset + built.limit} "
+            f"to get the next page (limit up to {settings.max_limit()})."
+        )
+    if built.limit_capped:
+        message += f" The requested limit was capped at MAX_LIMIT={built.limit}."
+    return message
+
+
 def run_list(
     config: Any,
     auth_manager: Any,
@@ -885,6 +946,8 @@ def run_list(
         "sysparm_display_value": "true",
         "sysparm_exclude_reference_link": "true",
     }
+    if spec.field_map:
+        sysparms["sysparm_fields"] = ",".join(dict.fromkeys(spec.field_map.values()))
     logger.info("list %s query_used=%s limit=%d offset=%d", spec.table, built.query, built.limit, built.offset)
     result = sn_get(config, auth_manager, f"table/{spec.table}", sysparms)
 
@@ -909,14 +972,30 @@ def run_list(
         return response
 
     records = [spec.mapper(r) for r in result.records] if spec.mapper else result.records
+    for record in records:
+        text = record.get("description")
+        if isinstance(text, str) and len(text) > LIST_DESCRIPTION_CHARS:
+            record["description"] = (
+                text[:LIST_DESCRIPTION_CHARS] + "... (truncated; get by number for the full text)"
+            )
+    returned = len(records)
+    total = result.total_count
+    if total is not None:
+        has_more = total > built.offset + returned
+    else:
+        has_more = returned >= built.limit
     response: Dict[str, Any] = {
         "success": True,
-        "message": f"Found {len(records)} {spec.plural}",
+        "message": _list_message(spec, built, returned, total, has_more),
         records_key: records,
-        "returned": len(records),
-        "total_count": result.total_count,
+        "returned": returned,
+        "total_count": total,
+        "has_more": has_more,
         **meta,
     }
+    if has_more:
+        # sysparm_offset counts rows before ACL filtering, so step by the limit.
+        response["next_offset"] = built.offset + built.limit
     if count_ignoring_status is not None:
         response["count_ignoring_status"] = count_ignoring_status
         total = result.total_count

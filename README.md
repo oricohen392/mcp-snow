@@ -142,7 +142,7 @@ uvicorn.run(app, host="0.0.0.0", port=8080)
 | `MCP_AUTH_TOKEN` | unset | If set, `/sse` and `/messages/` require `Authorization: Bearer <token>` |
 | `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8080` | Bind address |
 | `LOG_LEVEL` | `INFO` | `DEBUG` logs each ServiceNow request: method, path, sysparm params, status, ms (never headers/credentials) |
-| `MAX_LIMIT` | `100` | Upper bound for any list tool's `limit` |
+| `MAX_LIMIT` | `500` | Upper bound for any list tool's `limit` (page with `next_offset` beyond it) |
 | `DEFAULT_TIMEZONE` | `UTC` | IANA zone for dates given without an offset |
 | `CHOICE_CACHE_TTL_SECONDS` | `3600` | Cache TTL for `sys_choice` label lookups |
 

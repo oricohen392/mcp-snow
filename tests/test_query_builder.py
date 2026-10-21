@@ -278,10 +278,10 @@ def test_free_text_or_group_does_not_leak(config, auth):
 
 
 def test_limit_cap_and_offset(config, auth, monkeypatch):
-    result, fake = run_incidents(config, auth, limit=500, offset=40)
+    result, fake = run_incidents(config, auth, limit=900, offset=40)
     sent = fake.table_calls("incident")[-1]["params"]
-    assert sent["sysparm_limit"] == 100 and sent["sysparm_offset"] == 40
-    assert result["limit"] == 100 and result["limit_capped"] is True
+    assert sent["sysparm_limit"] == 500 and sent["sysparm_offset"] == 40
+    assert result["limit"] == 500 and result["limit_capped"] is True
     monkeypatch.setenv("MAX_LIMIT", "20")
     result, fake = run_incidents(config, auth, limit=50)
     assert fake.table_calls("incident")[-1]["params"]["sysparm_limit"] == 20
