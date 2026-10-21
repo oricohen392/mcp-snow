@@ -151,6 +151,10 @@ class TestChangeTools(unittest.TestCase):
             if url.endswith("/table/sys_choice"):
                 element = params["sysparm_query"].split("element=")[1].split("^")[0]
                 response.json.return_value = {"result": choices.get(element, [])}
+            elif url.endswith("/table/sys_user_group"):
+                response.json.return_value = {
+                    "result": [{"sys_id": "a" * 32, "name": "IT Support", "active": "true"}]
+                }
             else:
                 response.json.return_value = {
                     "result": [
@@ -195,7 +199,7 @@ class TestChangeTools(unittest.TestCase):
         self.assertIn("state=-5", query)
         self.assertIn("type=normal", query)
         self.assertIn("category=Hardware", query)
-        self.assertIn("assignment_group.nameLIKEIT Support", query)
+        self.assertIn("assignment_group=" + "a" * 32, query)
         self.assertIn("short_descriptionLIKETest^ORdescriptionLIKETest", query)
         self.assertIn("start_date>", query)
         self.assertTrue(query.endswith("^ORDERBYDESCsys_created_on"))

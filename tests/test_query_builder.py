@@ -7,7 +7,7 @@ timezones, label resolution, injection, precedence, ordering and limit cap.
 from unittest.mock import patch
 
 import pytest
-from fake_servicenow import FakeServiceNow
+from fake_servicenow import DEFAULT_GROUPS, FakeServiceNow, gid
 
 from servicenow_mcp.auth.auth_manager import AuthManager
 from servicenow_mcp.tools.access_tools import SearchGroupsParams, search_groups
@@ -36,8 +36,11 @@ def auth(config):
     return AuthManager(config.auth, config.instance_url)
 
 
+NOC_IDS = f"assignment_groupIN{gid(1)},{gid(2)}"  # 'NOC' matches NOC and INOC_1
+
+
 def run_incidents(config, auth, **kwargs):
-    fake = FakeServiceNow()
+    fake = FakeServiceNow(groups=DEFAULT_GROUPS)
     with patch("requests.get", side_effect=fake):
         result = list_incidents(config, auth, ListIncidentsParams(**kwargs))
     return result, fake
@@ -48,12 +51,13 @@ def run_incidents(config, auth, **kwargs):
 
 def test_group_partial_match(config, auth):
     result, fake = run_incidents(config, auth, assignment_group="NOC")
-    assert result["query_used"] == "assignment_group.nameLIKENOC" + ORDER
+    assert result["query_used"] == NOC_IDS + ORDER
     assert fake.last_query("incident") == result["query_used"]
+    assert [g["name"] for g in result["matched_groups"]] == ["NOC", "INOC_1"]
 
 
 def test_group_or_list_from_csv_json_and_list(config, auth):
-    expected = "assignment_group.nameLIKENOC^ORassignment_group.nameLIKEService Desk" + ORDER
+    expected = f"assignment_groupIN{gid(1)},{gid(2)},{gid(3)}" + ORDER
     for value in ("NOC, Service Desk", '["NOC", "Service Desk"]', ["NOC", "Service Desk"]):
         result, _ = run_incidents(config, auth, assignment_group=value)
         assert result["query_used"] == expected
@@ -83,18 +87,18 @@ def test_assigned_to_dot_walks(config, auth):
     ],
 )
 def test_group_filter_on_request_tables(config, auth, tool, params_cls, table):
-    fake = FakeServiceNow()
+    fake = FakeServiceNow(groups=DEFAULT_GROUPS)
     with patch("requests.get", side_effect=fake):
         result = tool(config, auth, params_cls(assignment_group="NOC"))
     assert result["success"]
-    assert fake.last_query(table) == "assignment_group.nameLIKENOC" + ORDER
+    assert fake.last_query(table) == NOC_IDS + ORDER
 
 
 def test_group_filter_on_change(config, auth):
-    fake = FakeServiceNow()
+    fake = FakeServiceNow(groups=DEFAULT_GROUPS)
     with patch("requests.get", side_effect=fake):
         result = list_change_requests(auth, config, {"assignment_group": "NOC"})
-    assert fake.last_query("change_request") == "assignment_group.nameLIKENOC" + ORDER
+    assert fake.last_query("change_request") == NOC_IDS + ORDER
     assert result["query_used"] == fake.last_query("change_request")
 
 
@@ -261,12 +265,12 @@ def test_free_text_or_group_does_not_leak(config, auth):
     q = result["query_used"]
     assert q == (
         "state=1^active=true"
-        "^assignment_group.nameLIKENOC^ORassignment_group.nameLIKEDBA"
+        f"^assignment_groupIN{gid(1)},{gid(2)},{gid(4)}"
         "^short_descriptionLIKEvpn^ORdescriptionLIKEvpn" + ORDER
     )
     # Every ^OR is followed by a condition on the same kind of field as its group
     for part in q[: -len(ORDER)].split("^OR")[1:]:
-        assert part.startswith(("assignment_group.name", "description"))
+        assert part.startswith("description")
 
 
 # --- I: limit, ordering --------------------------------------------------------------

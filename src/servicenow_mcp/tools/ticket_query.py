@@ -52,10 +52,17 @@ def _list_to_text(value: Any) -> Any:
 
 
 GROUP_DESC = (
-    "Assignment group name, PARTIAL and case-insensitive match on the group name "
-    "(assignment_group.nameLIKE...). Example: 'NOC' matches 'INOC_1' and 'NOC Tier 2'. "
+    "Assignment group name, PARTIAL and case-insensitive. Every word must appear in the group "
+    "name, in any order: 'NOC' matches 'NOC' and 'INOC_1'; 'cloud infra' matches "
+    "'Cloud Infrastructure' and 'Infra - Cloud Tier2'. "
+    "All matching groups are included and listed in matched_groups in the response; check it. "
     "Several groups: comma-separated, any of them matches (OR), e.g. 'NOC, Service Desk'. "
-    "A 32-character sys_id is matched exactly. Use search_groups to discover real names."
+    "A 32-character sys_id is matched exactly. Use the group's own language (e.g. Hebrew names "
+    "as they appear in ServiceNow); if unsure, call search_groups first."
+)
+CHILD_GROUPS_DESC = (
+    "Also include child groups (sys_user_group.parent) of the matched groups, up to 3 levels "
+    "(default false)."
 )
 GROUP_EXACT_DESC = (
     "Assignment group name, EXACT match (assignment_group.name=...). "
@@ -120,6 +127,7 @@ class TaskListParamsBase(BaseModel):
     offset: int = Field(0, ge=0, description=OFFSET_DESC)
     active: Optional[bool] = Field(None, description=ACTIVE_DESC)
     assignment_group: Optional[str] = Field(None, description=GROUP_DESC)
+    include_child_groups: bool = Field(False, description=CHILD_GROUPS_DESC)
     assignment_group_exact: Optional[str] = Field(None, description=GROUP_EXACT_DESC)
     assigned_to: Optional[str] = Field(None, description=ASSIGNED_TO_DESC)
     created_after: Optional[str] = Field(None, description=date_description("Created", "at or after", ">="))
@@ -357,6 +365,7 @@ class BuiltQuery:
     offset: int
     limit_capped: bool
     warnings: List[str]
+    matched_groups: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def validate_numbers(spec: TableSpec, raw: Any) -> List[str]:
@@ -369,6 +378,137 @@ def validate_numbers(spec: TableSpec, raw: Any) -> List[str]:
                 f"followed by digits, e.g. {spec.number_example}"
             )
     return numbers
+
+
+# ---------------------------------------------------------------------------
+# Assignment group resolution
+# ---------------------------------------------------------------------------
+
+GROUP_MATCH_LIMIT = 100
+CHILD_GROUP_DEPTH = 3
+GROUP_FIELDS = "sys_id,name,active"
+_GROUP_TOKEN_SPLIT = re.compile(r"[\s\-_/|:()]+")
+
+
+class NoMatchingGroupError(QueryInputError):
+    """No sys_user_group name contains every word of the requested group."""
+
+    error_type = "no_matching_group"
+
+
+class GroupLookupError(Exception):
+    """sys_user_group could not be queried (auth, network, ...); carries the SnResult."""
+
+    def __init__(self, result: Any):
+        super().__init__(result.message)
+        self.result = result
+
+
+def group_name_tokens(term: str) -> List[str]:
+    """Split a group name fragment into words; each must appear in the group name."""
+    text = sanitize_value(term, "assignment_group")
+    tokens = [t for t in _GROUP_TOKEN_SPLIT.split(text) if t]
+    return tokens or [text]
+
+
+def group_name_query(term: str, active_only: bool) -> QueryBuilder:
+    """nameLIKE<word1>^nameLIKE<word2>...: word order and separators do not matter."""
+    builder = QueryBuilder()
+    for token in group_name_tokens(term):
+        builder.like("name", token)
+    if active_only:
+        builder.eq("active", "true")
+    return builder.order_by("name")
+
+
+def _group_row(record: Dict[str, Any]) -> Dict[str, Any]:
+    row = {"name": display(record.get("name")), "sys_id": display(record.get("sys_id"))}
+    if str(display(record.get("active"))).lower() == "false":
+        row["active"] = False
+    return row
+
+
+def _query_groups(config: Any, auth_manager: Any, query: str):
+    return sn_get(
+        config,
+        auth_manager,
+        "table/sys_user_group",
+        {
+            "sysparm_query": query,
+            "sysparm_limit": GROUP_MATCH_LIMIT,
+            "sysparm_fields": GROUP_FIELDS,
+            "sysparm_exclude_reference_link": "true",
+        },
+    )
+
+
+def resolve_groups(
+    config: Any,
+    auth_manager: Any,
+    term: str,
+    include_children: bool,
+    warnings: List[str],
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    Find every group whose name contains all words of ``term``.
+
+    Active groups first; inactive ones only when no active group matches.
+    Returns None when the caller should fall back to a dot-walked
+    assignment_group.nameLIKE filter (sys_user_group not readable, or too many
+    matches). Raises NoMatchingGroupError or GroupLookupError.
+    """
+    groups: List[Dict[str, Any]] = []
+    result = None
+    for active_only in (True, False):
+        query = group_name_query(term, active_only).build()
+        result = _query_groups(config, auth_manager, query)
+        if not result.ok:
+            if result.error_type == "forbidden":
+                warnings.append(
+                    f"sys_user_group is not readable (HTTP 403); assignment_group '{term}' was "
+                    "matched with assignment_group.nameLIKE on the whole text instead."
+                )
+                return None
+            raise GroupLookupError(result)
+        groups = [_group_row(r) for r in result.records if display(r.get("sys_id"))]
+        if groups:
+            break
+    if not groups:
+        raise NoMatchingGroupError(
+            f"no assignment group name contains all of {group_name_tokens(term)} (active or "
+            f"inactive). Call search_groups with one word, e.g. '{group_name_tokens(term)[0]}', "
+            "to see the real group names, then retry with one of them."
+        )
+    if (result.total_count or 0) > GROUP_MATCH_LIMIT:
+        warnings.append(
+            f"assignment_group '{term}' matches {result.total_count} groups (more than "
+            f"{GROUP_MATCH_LIMIT}); matched with assignment_group.nameLIKE instead. Use a more "
+            "specific name."
+        )
+        return None
+
+    if include_children:
+        seen = {g["sys_id"] for g in groups}
+        frontier = list(seen)
+        for _ in range(CHILD_GROUP_DEPTH):
+            query = QueryBuilder().in_("parent", frontier).eq("active", "true").build()
+            children = _query_groups(config, auth_manager, query)
+            if not children.ok:
+                warnings.append(
+                    f"child groups of '{term}' could not be loaded ({children.message}); "
+                    "only the matched groups are included."
+                )
+                break
+            new = [_group_row(r) for r in children.records]
+            new = [g for g in new if g["sys_id"] and g["sys_id"] not in seen]
+            if not new:
+                break
+            for g in new:
+                g["child_of_match"] = True
+                seen.add(g["sys_id"])
+            groups.extend(new)
+            frontier = [g["sys_id"] for g in new]
+    return groups
 
 
 def _person_or_group_conditions(base: str, items: List[str], name_field: str, exact_alt: Optional[str]):
@@ -414,10 +554,31 @@ def build_query(
     if get("active") is not None:
         builder.eq("active", "true" if get("active") else "false")
 
+    matched_groups: List[Dict[str, Any]] = []
     if get("assignment_group"):
         items = split_list(get("assignment_group"), "assignment_group")
         if items:
-            builder.or_group(_person_or_group_conditions("assignment_group", items, "name", None))
+            group_ids: List[str] = []
+            fallback_items: List[str] = []
+            for item in items:
+                if is_sys_id(item):
+                    group_ids.append(item.lower())
+                    continue
+                found = resolve_groups(
+                    config, auth_manager, item, bool(get("include_child_groups")), warnings
+                )
+                if found is None:
+                    fallback_items.append(item)
+                    continue
+                for group in found:
+                    if group["sys_id"] not in group_ids:
+                        group_ids.append(group["sys_id"])
+                        matched_groups.append(group)
+            conditions = []
+            if group_ids:
+                conditions.append(("assignment_group", "IN", group_ids))
+            conditions.extend(("assignment_group.name", "LIKE", item) for item in fallback_items)
+            builder.or_group(conditions)
 
     if get("assignment_group_exact"):
         items = split_list(get("assignment_group_exact"), "assignment_group_exact")
@@ -461,6 +622,7 @@ def build_query(
         offset=offset,
         limit_capped=int(requested) > cap,
         warnings=warnings,
+        matched_groups=matched_groups,
     )
 
 
@@ -469,13 +631,21 @@ def build_query(
 # ---------------------------------------------------------------------------
 
 
-def _input_error(message: str, error_prefix: str) -> Dict[str, Any]:
+def _input_error(message: str, error_prefix: str, error_type: str = "invalid_input") -> Dict[str, Any]:
     return {
         "success": False,
         "status_code": None,
-        "error_type": "invalid_input",
+        "error_type": error_type,
         "message": f"{error_prefix}: {message}",
     }
+
+
+def query_error_response(exc: Exception, error_prefix: str) -> Dict[str, Any]:
+    """Failure payload for an error raised while building a query."""
+    if isinstance(exc, GroupLookupError):
+        response = exc.result.error_dict(f"{error_prefix} (assignment group lookup)")
+        return response
+    return _input_error(str(exc), error_prefix, getattr(exc, "error_type", "invalid_input"))
 
 
 def run_list(
@@ -490,8 +660,8 @@ def run_list(
     """Run a list query and build the transparent response."""
     try:
         built = build_query(config, auth_manager, spec, params, extra)
-    except QueryInputError as e:
-        response = _input_error(str(e), error_prefix)
+    except (QueryInputError, GroupLookupError) as e:
+        response = query_error_response(e, error_prefix)
         response[records_key] = []
         return response
 
@@ -510,6 +680,8 @@ def run_list(
         "limit": built.limit,
         "offset": built.offset,
     }
+    if built.matched_groups:
+        meta["matched_groups"] = built.matched_groups
     if built.limit_capped:
         meta["limit_capped"] = True
     if built.warnings:

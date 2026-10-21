@@ -21,7 +21,7 @@ def test_smoke_pass(monkeypatch, capsys):
     with patch("requests.get", side_effect=fake):
         assert main(["--group", "NOC", "--limit", "2"]) == 0
     out = capsys.readouterr().out
-    assert "query_used : assignment_group.nameLIKENOC^ORDERBYDESCsys_created_on" in out
+    assert "query_used : assignment_group=" + "a" * 32 + "^ORDERBYDESCsys_created_on" in out
     assert "search_groups('NOC'): OK" in out
     assert "never-printed" not in out
     assert "RESULT: PASS" in out

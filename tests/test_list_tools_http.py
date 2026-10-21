@@ -50,7 +50,7 @@ LIST_TOOLS = [
     ("list_requests", lambda c, a: list_requests(c, a, ListRequestsParams(active=True)), "requests"),
     (
         "list_request_items",
-        lambda c, a: list_request_items(c, a, ListRequestItemsParams(assignment_group="NOC")),
+        lambda c, a: list_request_items(c, a, ListRequestItemsParams(assignment_group_exact="NOC")),
         "request_items",
     ),
     ("search_groups", lambda c, a: search_groups(c, a, SearchGroupsParams(name_part="NOC")), "groups"),

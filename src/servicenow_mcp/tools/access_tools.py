@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, Field
 
 from servicenow_mcp.auth.auth_manager import AuthManager
-from servicenow_mcp.tools.ticket_query import EMPTY_RESULT_HINT, display
+from servicenow_mcp.tools.ticket_query import EMPTY_RESULT_HINT, display, group_name_query
 from servicenow_mcp.utils import settings
 from servicenow_mcp.utils.config import ServerConfig
 from servicenow_mcp.utils.http import sn_get
@@ -24,9 +24,10 @@ class SearchGroupsParams(BaseModel):
     name_part: str = Field(
         ...,
         description=(
-            "Part of the group name, partial and case-insensitive (nameLIKE). "
-            "Example: 'NOC' finds 'INOC_1', 'NOC Tier 2'. Use the returned exact 'name' "
-            "with assignment_group_exact, or the fragment with assignment_group."
+            "Part of the group name, partial and case-insensitive. Every word must appear "
+            "in the name, in any order: 'NOC' finds 'INOC_1' and 'NOC Tier 2'; 'cloud infra' "
+            "finds 'Infrastructure - Cloud'. Use the returned exact 'name' with "
+            "assignment_group_exact, or the fragment with assignment_group."
         ),
     )
     active_only: bool = Field(True, description="Only active groups (default true).")
@@ -42,10 +43,7 @@ def search_groups(
 ) -> dict:
     """Find sys_user_group records whose name contains name_part."""
     try:
-        builder = QueryBuilder().like("name", params.name_part)
-        if params.active_only:
-            builder.eq("active", "true")
-        query = builder.order_by("name").build()
+        query = group_name_query(params.name_part, params.active_only).build()
     except QueryInputError as e:
         return {
             "success": False,
